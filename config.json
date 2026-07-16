@@ -1,0 +1,78 @@
+{
+  "directories": {
+    "results": "./results/",
+    "source": "./source/",
+    "models": "./models/",
+    "cache": "../cache_train_v2/"
+  },
+  "compression": {
+    "accuracy": 0.05,
+    "block_size": 8,
+    "decimal_places": 2,
+    "dct_type": 2,
+    "crs": "",
+    "auto_select_block_size": true,
+    "auto_select_sample_size": 1000,
+    "auto_select_std_threshold_high": 10.0,
+    "auto_select_std_threshold_medium": 5.0,
+    "rgb_quality": 85,
+    "lossless": false,
+    "uint8_accuracy_mode": true,
+    "uint8_accuracy": 10,
+    "uint8_scaling_factor": [
+      1,
+      10
+    ],
+    "ycbcr_fallback_multipliers": [
+      1.0,
+      0.9,
+      0.8,
+      0.7,
+      0.6,
+      0.5,
+      0.4,
+      0.3,
+      0.2,
+      0.1
+    ],
+    "ycbcr_per_block_mode": true,
+    "allowed_block_sizes": [
+      8,
+      16,
+      32
+    ],
+    "rgb_strip_height_px": 2048
+  },
+  "performance": {
+    "parallel": {
+      "num_processes": "auto"
+    },
+    "optimizations": {
+      "fast_eval_basis": true,
+      "verify_with_full_idct": true,
+      "l2_precheck_enabled": true,
+      "incremental_backscan": true
+    }
+  },
+  "model": {
+    "backend": "binary",
+    "advanced_heuristic": false,
+    "minimize_backscan": 10,
+    "backscan_break_after": 3,
+    "accept_prediction_if_within_accuracy": true,
+    "uint8_use_L_prediction": true,
+    "uint8_L_prediction_scales": [
+      0.7,
+      1.0,
+      1.1,
+      1.5,
+      2.0
+    ]
+  },
+  "output": {
+    "quiet": false,
+    "delete_temp_files": true,
+    "compression_method": "LZMA2",
+    "tiff_compression": "DEFLATE"
+  }
+}

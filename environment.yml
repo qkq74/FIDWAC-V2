@@ -1,0 +1,20 @@
+name: fidwac
+channels:
+  - conda-forge
+dependencies:
+  - python>=3.10,<3.13
+  - pip
+  - numpy>=1.21
+  - scipy>=1.7
+  - rasterio>=1.2
+  - msgpack-python>=1.0
+  - py7zr>=0.20
+  - tqdm>=4.62
+  - numba>=0.55
+  - gdal
+  - libjpeg-turbo
+  - 7zip
+  - p7zip
+  - tk
+  - pip:
+      - PyTurboJPEG
