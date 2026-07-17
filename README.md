@@ -1259,6 +1259,7 @@ For academic use, repository citation metadata is available in `CITATION.cff`, a
 6. Sayood, K. (2017). *Introduction to Data Compression* (5th ed.). Morgan Kaufmann.
 7. ZSIP/FIDWaC - Original implementation: https://github.com/ZSIP/FIDWaC
 8. ZSIP/FIDWAC_v2 - https://github.com/ZSIP/FIDWAC_v2
+9. Tange, O. (2022, November 22). GNU Parallel 20221122 ('Херсо́н'). Zenodo. https://doi.org/10.5281/zenodo.7347980
 
 ---
 
