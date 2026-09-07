@@ -549,17 +549,17 @@ The `models/` directory contains pre-built lookup models trained on tens of mill
 
 The implementation extracts **four DCT block features**: `ac_abs_mean`, `zero_ratio`, `ac_std`, and `std_dev`. The first two (`ac_abs_mean`, `zero_ratio`) are used directly as indices into the current 2D quantile lookup grid. `ac_std` and `std_dev` are still computed as diagnostic/extension features and for compatibility with earlier feature analysis. Lookup tables are precomputed offline and loaded at startup.
 
-$$
+```math
 \hat{L}_{\mathrm{adv}} =
 \mathcal{T}_{\mathrm{grid}}\left[
 \mathrm{qbin}\left(
-\log\left(1+\text{ac\_abs\_mean}\right)
+\log\left(1+\mathrm{ac\_abs\_mean}\right)
 \right),
 \mathrm{qbin}\left(
-\text{zero\_ratio}
+\mathrm{zero\_ratio}
 \right)
 \right]
-$$
+```
 
 **Available lookup models** (`models/` directory):
 
