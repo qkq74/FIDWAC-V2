@@ -157,7 +157,7 @@ def _decode_dct_channel_rgb(
             coeffs = np.array([], dtype=np.int64)
 
         # Reconstruct channel
-        result = np.zeros((padded_H, padded_W), dtype=np.float32)
+        result = np.zeros((padded_H, padded_W), dtype=np.float64)
         coeff_pos = 0
 
         for idx, length in enumerate(lengths):
