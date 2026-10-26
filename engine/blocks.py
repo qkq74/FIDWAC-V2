@@ -776,6 +776,30 @@ def process_strip_batch_rgb(
 # ---------------------------------------------------------------------------
 
 
+def _rgb_error_via_decoder(ch_data, n, sf, r_f, g_f, b_f):
+    """Maksymalny błąd RGB bloku tak, jak odtworzy go DEKODER: reconstruct_block (scipy idct2),
+    clip(+128), ycbcr_to_rgb. Wołane tylko dla kandydata uznanego za ostateczny."""
+    import time as _t
+    _v0 = _t.perf_counter()
+    planes = {}
+    for ch in ("Y", "Cb", "Cr"):
+        if ch_data[ch]["L"] > 0:
+            rec = reconstruct_block(ch_data[ch]["coeffs"].tolist(), n, sf, -9999, uint8_mode=False)
+            planes[ch] = np.clip(np.asarray(rec, dtype=np.float64) + 128.0, 0.0, 255.0)
+        else:
+            planes[ch] = np.zeros((n, n), dtype=np.float64)  # jak w dekoderze (length == 0)
+    R_dec, G_dec, B_dec = ycbcr_to_rgb(planes["Y"], planes["Cb"], planes["Cr"])
+    _err = float(
+        max(np.max(np.abs(r_f - R_dec)), np.max(np.abs(g_f - G_dec)), np.max(np.abs(b_f - B_dec)))
+    )
+    try:
+        from compress.timing import add as _ta
+        _ta("verify_e", _t.perf_counter() - _v0)
+    except Exception:
+        pass
+    return _err
+
+
 def process_block_batch_rgb(
     batch_data: Tuple[int, List],
     config: Optional[Config] = None,
@@ -1090,6 +1114,15 @@ def process_block_batch_rgb(
                     )
                 )
 
+                # Margines 3: dekoder różni się od szybkiej ścieżki tylko remisami
+                # zaokrągleń (maks ~1/kanał → ~3 w RGB). Gdy błąd ma taki margines
+                # poniżej progu, weryfikacja nie może zmienić decyzji — pomijamy ją.
+                if (
+                    base_accuracy - 3.0 < max_rgb_err <= base_accuracy
+                    and getattr(config.compression, "ycbcr_decode_verify", True)
+                ):
+                    max_rgb_err = _rgb_error_via_decoder(ch_data, n, sf, r_f, g_f, b_f)
+
                 if max_rgb_err < best_err:
                     best_err = max_rgb_err
                     best_metadata = ch_data
@@ -1102,12 +1135,24 @@ def process_block_batch_rgb(
                 continue
 
         if best_metadata is None:
+            # Wszystkie mnożniki rzuciły wyjątek — nie zapisujemy błędu 0 (ukrywałoby
+            # naruszenie). Blok DC-only dekoduje się do płaskiej płaszczyzny (średnia
+            # koloru), a błąd liczymy uczciwie tą samą ścieżką co dekoder.
             mult = fallback_multipliers[-1]
-            empty = np.array([], dtype=np.int64)
-            best_metadata = {
-                ch: {"L": 0, "coeffs": empty, "multiplier": mult} for ch in ("Y", "Cb", "Cr")
-            }
-            best_err = 0.0
+            best_metadata = {}
+            for ch_name in ("Y", "Cb", "Cr"):
+                zz = np.asarray(zigzag_blocks[ch_name], dtype=np.float64)
+                coeffs = (
+                    np.round(zz[:1] * sf).astype(np.int64)
+                    if zz.size
+                    else np.array([], dtype=np.int64)
+                )
+                best_metadata[ch_name] = {
+                    "L": int(coeffs.size),
+                    "coeffs": coeffs,
+                    "multiplier": mult,
+                }
+            best_err = _rgb_error_via_decoder(best_metadata, n, sf, r_f, g_f, b_f)
             best_mult_idx = n_mult - 1
 
         metadata = {

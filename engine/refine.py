@@ -138,6 +138,119 @@ _nb_jump_diff(_d, _b, _c, 0, 1)
 del _d, _b, _c
 
 
+@nb.njit(cache=True)
+def _nb_err_len(coeffs, basis_flat, orig_flat, L, buf):
+    npx = orig_flat.shape[0]
+    for p in range(npx):
+        buf[p] = 0.0
+    for k in range(L):
+        c = coeffs[k]
+        for p in range(npx):
+            buf[p] += c * basis_flat[k, p]
+    mx = -1.0e300
+    mn = 1.0e300
+    for p in range(npx):
+        d = orig_flat[p] - buf[p]
+        if d > mx:
+            mx = d
+        if d < mn:
+            mn = d
+    if mx > -mn:
+        return mx
+    return -mn
+
+
+@nb.njit(cache=True)
+def _nb_binsearch(coeffs, basis_flat, orig_flat, accuracy, lo, hi):
+    buf = np.empty(orig_flat.shape[0])
+    ans = hi
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if _nb_err_len(coeffs, basis_flat, orig_flat, mid, buf) <= accuracy:
+            ans = mid
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    return ans
+
+
+@nb.njit(cache=True)
+def _nb_qerr_u8(dq, basis_flat, orig_flat, L):
+    npx = orig_flat.shape[0]
+    buf = np.zeros(npx)
+    for k in range(L):
+        c = dq[k]
+        for p in range(npx):
+            buf[p] += c * basis_flat[k, p]
+    mx = -1.0e300
+    mn = 1.0e300
+    for p in range(npx):
+        r = np.rint(buf[p] + 128.0)
+        if r < 0.0:
+            r = 0.0
+        if r > 255.0:
+            r = 255.0
+        d = (orig_flat[p] + 128.0) - r
+        if d > mx:
+            mx = d
+        if d < mn:
+            mn = d
+    if mx > -mn:
+        return mx
+    return -mn
+
+
+@nb.njit(cache=True)
+def _nb_backscan(diff, basis_flat, coeffs32, orig, L_found, start, accuracy, break_after, is_u8):
+    df = diff.ravel()
+    of = orig.ravel()
+    npx = of.shape[0]
+    new_L = L_found
+    fail = 0
+    for k in range(L_found - 1, start - 1, -1):
+        c = np.float64(coeffs32[k])
+        for p in range(npx):
+            t = basis_flat[k, p] * c
+            df[p] = df[p] + t
+        mx = -1.0e300
+        mn = 1.0e300
+        for p in range(npx):
+            if is_u8:
+                r = np.rint(of[p] - df[p] + 128.0)
+                if r < 0.0:
+                    r = 0.0
+                if r > 255.0:
+                    r = 255.0
+                d = (of[p] + 128.0) - r
+            else:
+                d = df[p]
+            if d > mx:
+                mx = d
+            if d < mn:
+                mn = d
+        err = mx if mx > -mn else -mn
+        if err <= accuracy:
+            new_L = k
+            fail = 0
+        else:
+            fail += 1
+            if break_after > 0 and fail >= break_after:
+                break
+    return new_L
+
+
+_FLAT_BASIS = {}
+
+
+def _flat_basis(n, dct_type):
+    key = (n, dct_type)
+    b = _FLAT_BASIS.get(key)
+    if b is None:
+        a = np.ascontiguousarray(_get_idct_basis(n, dct_type))
+        b = _FLAT_BASIS[key] = a.reshape(a.shape[0], -1)
+    return b
+
+
 def _eval_error_for_len(
     org_dct_zigzag: np.ndarray,
     original_matrix: np.ndarray,
@@ -639,6 +752,8 @@ def refine_dct_array(
         except (ValueError, IndexError):
             pass
 
+    _fast = False
+    q64 = None
     # Binary search
     if predicted_L is not None and predicted_L > 0 and use_fast_basis and use_incremental:
         # Heuristic + fast incremental path: use fast incremental search
@@ -670,16 +785,23 @@ def refine_dct_array(
         )
     else:
         # No prediction → pure binary search (always finds global minimum L)
-        L_found, _ = _binary_search_min_len(
-            org_dct_zigzag,
-            original_matrix,
-            accuracy,
-            n,
-            dct_type,
-            lo=1,
-            hi=total_len,
-            use_fast_basis=use_fast_basis,
-        )
+        if use_fast_basis:
+            zz64 = np.ascontiguousarray(org_dct_zigzag, dtype=np.float64)
+            of = np.ascontiguousarray(original_matrix, dtype=np.float64).ravel()
+            bf = _flat_basis(n, dct_type)
+            _fast = True
+            L_found = int(_nb_binsearch(zz64, bf, of, float(accuracy), 1, total_len))
+        else:
+            L_found, _ = _binary_search_min_len(
+                org_dct_zigzag,
+                original_matrix,
+                accuracy,
+                n,
+                dct_type,
+                lo=1,
+                hi=total_len,
+                use_fast_basis=use_fast_basis,
+            )
 
     # Backscan for minimization
     if backscan_base > 0 and L_found > 1:
@@ -695,6 +817,22 @@ def refine_dct_array(
             coeffs = org_dct_zigzag.astype(np.float32, copy=False)
             recon = np.tensordot(coeffs[:L_found], basis[:L_found], axes=(0, 0))
             diff = original_matrix.astype(np.float32, copy=False) - recon
+            if original_matrix.dtype == np.float64 and diff.dtype == np.float64:
+                L_found = int(
+                    _nb_backscan(
+                        np.ascontiguousarray(diff),
+                        _flat_basis(n, dct_type),
+                        np.ascontiguousarray(coeffs),
+                        np.ascontiguousarray(original_matrix),
+                        int(L_found),
+                        int(start),
+                        float(accuracy),
+                        int(backscan_break),
+                        bool(_is_uint8),
+                    )
+                )
+                new_L = L_found
+                start = L_found  # pętla poniżej nie wykona się
             _tmp = np.empty((n, n), dtype=np.float64)  # pre-alloc buffer
 
             new_L = L_found
@@ -742,7 +880,18 @@ def refine_dct_array(
                     continue
 
     # Verification with full IDCT
-    if verify_full:
+    # Pomijamy, gdy błąd szybki (baza + zaokrąglenie uint8) jest o >= 1 poniżej progu: różnica między
+    # IDCT scipy a bazą to ~1e-13, więc zaokrąglenie piksela może zmienić błąd najwyżej o 1.
+    _skip_verify = False
+    if _fast:
+        if _is_uint8:
+            _skip_verify = _nb_qerr_u8(zz64, bf, of, int(L_found)) + 1.0 <= accuracy
+        else:
+            # float: IDCT scipy vs baza różnią się o ~1e-13, margines 1e-6 jest daleko powyżej szumu
+            _skip_verify = (
+                _nb_err_len(zz64, bf, of, int(L_found), np.empty(n * n)) + 1e-6 <= accuracy
+            )
+    if verify_full and not _skip_verify:
         err_full = _eval_error_for_len(
             org_dct_zigzag,
             original_matrix,
@@ -771,15 +920,33 @@ def refine_dct_array(
             )
 
     # Build result
-    coeffs = org_dct_zigzag[:L_found]
-    result = np.round(coeffs * scaling_factor).astype(int)
+    if _fast and org_dct_zigzag.dtype == np.float64:
+        q64 = np.round(zz64 * scaling_factor)
+        dq_all = q64 / scaling_factor
+        result = q64[:L_found].astype(int)
+    else:
+        coeffs = org_dct_zigzag[:L_found]
+        result = np.round(coeffs * scaling_factor).astype(int)
 
     # Verify error AFTER quantization (rounding error was not accounted for in binary search)
     # Dequantization: coeff_stored/sf ≠ org_dct_zigzag[:L] → actual error may exceed accuracy
     def _eval_quantized_error(L):
         """Compute reconstruction error from dequantized coefficients."""
+        if q64 is not None and _is_uint8:
+            return float(_nb_qerr_u8(dq_all, bf, of, int(L)))
+        if q64 is not None:
+            return float(_nb_err_len(dq_all, bf, of, int(L), np.empty(n * n)))
         c = org_dct_zigzag[:L]
         dq = np.round(c * scaling_factor).astype(np.float64) / scaling_factor
+        if use_fast_basis and _is_uint8 and predicted_L is None:
+            return float(
+                _nb_qerr_u8(
+                    np.ascontiguousarray(dq),
+                    _flat_basis(n, dct_type),
+                    np.ascontiguousarray(original_matrix, dtype=np.float64).ravel(),
+                    int(L),
+                )
+            )
         dq_zigzag = np.zeros_like(org_dct_zigzag, dtype=np.float64)
         dq_zigzag[:L] = dq
         return _eval_error_for_len(
@@ -802,7 +969,11 @@ def refine_dct_array(
         while max_error > accuracy and L_found < total_len and quant_refine < 16:
             L_found += 1
             quant_refine += 1
-            result = np.round(org_dct_zigzag[:L_found] * scaling_factor).astype(int)
+            result = (
+                q64[:L_found].astype(int)
+                if q64 is not None
+                else np.round(org_dct_zigzag[:L_found] * scaling_factor).astype(int)
+            )
             max_error = _eval_quantized_error(L_found)
 
     return result, max_error, None  # Don't return reconstruction - not needed
