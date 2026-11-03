@@ -1,5 +1,5 @@
 """
-FIDVAC v2 GUI — statistics tracking and display
+FIDWAC v2 GUI — statistics tracking and display
 ================================================
 Mixin class GUIStats providing:
   _build_stats_panel()

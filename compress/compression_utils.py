@@ -1,5 +1,5 @@
 """
-FIDVAC v2 - Shared compression utilities
+FIDWAC v2 - Shared compression utilities
 =========================================
 Common helpers used across compression paths:
   - data characteristics detection
@@ -10,6 +10,7 @@ Common helpers used across compression paths:
 """
 
 import os
+import re
 import shutil
 import subprocess
 from typing import Optional, Tuple, List, Dict, Any
@@ -61,12 +62,74 @@ def extract_blocks(
 # ---------------------------------------------------------------------------
 
 
+def _sample_results_per_block(sample_blocks, test_n, config):
+    """Sample results of the per-block path: (compressed_list, errors) as process_block returns them."""
+    compressed_list = []
+    errors = []
+    for block_data in sample_blocks:
+        try:
+            _, compressed, error = process_block(block_data, config)
+            compressed_list.append(compressed)
+            errors.append(error)
+        except Exception:
+            compressed_list.append([0] * (test_n * test_n))
+            errors.append(0.0)
+    return compressed_list, errors
+
+
+def _sample_results_f32(grid, idx, test_n, config, nodata_value, dtype=np.float32):
+    """Sample results of float32 blocks on arrays, the same values process_block gives. grid (m, n, n)
+    holds the blocks, idx the sampled ones. All-zero blocks give 0, all-NoData blocks 1, clean blocks
+    the search of engine.f32_arrays (identical to refine_dct_array), and the blocks that mix zeros or
+    NoData with values go through process_block. process_block transforms a single block with
+    dct2 on 2-D input (rows first), so the sample DCT uses the same axis order."""
+    from scipy.fft import dct
+    from core.dct import _get_zigzag_indices
+    from engine.f32_arrays import search_f32
+
+    m = len(idx)
+    A = np.ascontiguousarray(grid[idx], dtype=dtype)
+    nd_eq = (A == nodata_value) if nodata_value is not None else np.zeros(A.shape, dtype=bool)
+    allzero = (A == 0).all(axis=(1, 2))
+    allnd = nd_eq.all(axis=(1, 2)) & ~allzero
+    clean = np.isfinite(A).all(axis=(1, 2)) & ~(A == 0).any(axis=(1, 2)) & ~nd_eq.any(axis=(1, 2))
+    compressed = [None] * m
+    errors = [0.0] * m
+    for i in np.flatnonzero(allzero):
+        compressed[int(i)] = 0
+    for i in np.flatnonzero(allnd):
+        compressed[int(i)] = 1
+    todo = np.flatnonzero(clean)
+    if todo.size:
+        zz_idx = _get_zigzag_indices(test_n)
+        C = np.ascontiguousarray(A[todo])
+        t = config.compression.dct_type
+        dct_c = dct(dct(C, axis=1, norm="ortho", type=t), axis=2, norm="ortho", type=t)
+        dct_c = np.round(dct_c, config.compression.decimal_places)
+        zz = np.ascontiguousarray(dct_c.reshape(todo.size, -1)[:, zz_idx], dtype=np.float32)
+        LF, ERR, RES = search_f32(
+            zz, C, np.full(todo.size, float(config.compression.accuracy)), config.scaling_factor,
+            t, backscan=int(config.model.minimize_backscan),
+            brk=int(config.model.backscan_break_after),
+        )
+        for j, i in enumerate(todo):
+            compressed[int(i)] = RES[j, : int(LF[j])].tolist()
+            errors[int(i)] = float(ERR[j])
+    for i in np.flatnonzero(~(allzero | allnd | clean)):
+        _, comp, err = process_block((int(idx[i]), grid[idx[i]], nodata_value), config)
+        compressed[int(i)] = comp
+        errors[int(i)] = err
+    return compressed, errors
+
+
 def auto_select_block_size(
     image: np.ndarray,
     config: Config,
     nodata_value: Optional[float] = None,
+    src_dtype: Optional[str] = None,
 ) -> int:
-    """Auto-select optimal block size (8, 16, 32) based on image std and sample compression."""
+    """Auto-select optimal block size (8, 16, 32) based on image std and sample compression.
+    float32 data samples on arrays (same results as the per-block path, no per-block refinement)."""
     if not config.output.quiet:
         print("  Auto-selecting block size...")
 
@@ -94,31 +157,36 @@ def auto_select_block_size(
     results = {}
     for test_n in test_sizes:
         padded, _ = pad_image(image, test_n)
-        blocks = extract_blocks(padded, test_n, nodata_value)
-
         max_sample = config.compression.auto_select_sample_size
-        step = max(1, len(blocks) // min(max_sample, len(blocks)))
-        sample_blocks = blocks[::step][:max_sample]
-
-        compressed_list = []
+        if src_dtype == "float32":
+            # sample straight from the block array: the same evenly spaced blocks as blocks[::step]
+            H, W = padded.shape
+            grid = padded.reshape(H // test_n, test_n, W // test_n, test_n).transpose(0, 2, 1, 3)
+            grid = grid.reshape(-1, test_n, test_n)
+            total = grid.shape[0]
+            step = max(1, total // min(max_sample, total))
+            idx = np.arange(0, total, step)[:max_sample]
+            compressed_list, errors = _sample_results_f32(grid, idx, test_n, config, nodata_value)
+            sample_size = len(idx)
+        else:
+            blocks = extract_blocks(padded, test_n, nodata_value)
+            total = len(blocks)
+            step = max(1, total // min(max_sample, total))
+            sample_blocks = blocks[::step][:max_sample]
+            compressed_list, errors = _sample_results_per_block(sample_blocks, test_n, config)
+            sample_size = len(sample_blocks)
         total_error = 0.0
-        for block_data in sample_blocks:
-            try:
-                _, compressed, error = process_block(block_data, config)
-                compressed_list.append(compressed)
-                total_error += error
-            except Exception:
-                compressed_list.append([0] * (test_n * test_n))
+        for error in errors:
+            total_error += error
 
-        sample_size = len(sample_blocks)
         sample_msgpack_size = len(msgpack.packb(compressed_list, use_bin_type=True))
-        estimated_size = (sample_msgpack_size / sample_size) * len(blocks)
+        estimated_size = (sample_msgpack_size / sample_size) * total
         avg_error = total_error / sample_size
 
         results[test_n] = {"estimated_size": estimated_size, "avg_error": avg_error}
         if not config.output.quiet:
             print(
-                f"    N={test_n}: blocks={len(blocks)}, est_size={estimated_size/1024:.1f}KB, avg_error={avg_error:.6f}"
+                f"    N={test_n}: blocks={total}, est_size={estimated_size/1024:.1f}KB, avg_error={avg_error:.6f}"
             )
 
     best_n = min(results, key=lambda n: results[n]["estimated_size"])
@@ -233,14 +301,15 @@ def auto_select_uint8_parameters(
     for test_sf, test_bs in test_configs:
         # Prepare image in uint8 (already is) and sample blocks
         padded, _ = pad_image(image, test_bs)
-        blocks = extract_blocks(padded, test_bs, nodata_value)
-
         max_sample = config.compression.auto_select_sample_size
-        step = max(1, len(blocks) // min(max_sample, len(blocks)))
-        sample_blocks = blocks[::step][:max_sample]
+        H, W = padded.shape
+        grid = padded.reshape(H // test_bs, test_bs, W // test_bs, test_bs).transpose(0, 2, 1, 3)
+        grid = grid.reshape(-1, test_bs, test_bs)
+        total = grid.shape[0]
+        step = max(1, total // min(max_sample, total))
+        idx = np.arange(0, total, step)[:max_sample]
 
-        # Test with this (sf, bs) combination
-        # Temporarily set config for this test
+        # Evaluate this (scaling factor, block size) pair; the original config values are restored below.
         orig_sf = config.compression.uint8_scaling_factor
         orig_override = getattr(config, "_scaling_factor_override", None)
         orig_decimal = config.compression.decimal_places
@@ -251,18 +320,13 @@ def auto_select_uint8_parameters(
         else:
             config.compression.decimal_places = 0
 
-        compressed_list = []
+        # uint8 blocks are sampled as process_block does them (no src dtype): float64 values and DCT
+        compressed_list, errors = _sample_results_f32(
+            grid, idx, test_bs, config, nodata_value, np.float64)
         total_error = 0.0
-        max_error = 0.0
-        for block_data in sample_blocks:
-            try:
-                _, compressed, error = process_block(block_data, config)
-                compressed_list.append(compressed)
-                total_error += error
-                max_error = max(max_error, float(error))
-            except Exception:
-                compressed_list.append([0] * (test_bs * test_bs))
-                max_error = float("inf")
+        for error in errors:
+            total_error += error
+        max_error = max(errors) if errors else 0.0
 
         # Restore original sf
         config.compression.uint8_scaling_factor = orig_sf
@@ -273,9 +337,9 @@ def auto_select_uint8_parameters(
         else:
             config._scaling_factor_override = orig_override
 
-        sample_size = len(sample_blocks)
+        sample_size = len(idx)
         sample_msgpack_size = len(msgpack.packb(compressed_list, use_bin_type=True))
-        estimated_size = (sample_msgpack_size / sample_size) * len(blocks)
+        estimated_size = (sample_msgpack_size / sample_size) * total
         avg_error = total_error / sample_size
         valid = max_error <= float(
             getattr(config.compression, "uint8_accuracy", config.compression.accuracy)
@@ -419,12 +483,18 @@ def _find_7z_cmd() -> Optional[str]:
 
 
 def pack_to_7z(
-    output_path: str, *source_files: str, store: bool = False, method: str = "LZMA2"
+    output_path: str,
+    *source_files: str,
+    store: bool = False,
+    method: str = "LZMA2",
+    lzma2_block_size: str = "",
 ) -> None:
     """Pack source_files into a .7z archive.
 
     store=True  → no compression (-mx=0), used for JPEG strips
     store=False → max compression (-mx=9) with given method
+    lzma2_block_size: LZMA2 block size ("1m", "2m", ...; "" = 7-Zip default). 7-Zip compresses the
+    blocks in parallel, so smaller blocks are much faster with nearly the same size.
     """
     if os.path.exists(output_path):
         os.remove(output_path)
@@ -454,11 +524,17 @@ def pack_to_7z(
         else:
             if method not in ("LZMA2", "PPMD", "BZIP2", "DEFLATE"):
                 method = "LZMA2"
+            m0 = method
+            block = (lzma2_block_size or "").strip().lower()
+            if method == "LZMA2" and block:
+                if not re.fullmatch(r"\d+[kmg]?", block):
+                    raise ValueError(f"lzma2_block_size: expected e.g. 1m, 2m, 4m, got {lzma2_block_size!r}")
+                m0 = f"LZMA2:c={block}"
             args = [
                 cmd,
                 "a",
                 "-mx=9",
-                f"-m0={method}",
+                f"-m0={m0}",
                 f"-mmt={cpu_count}",
                 abs_output_path,
                 *source_files_rel,

@@ -96,10 +96,28 @@ if not defined SCRIPT_PATH_WSL (
     exit /b 1
 )
 
+REM Check optional backends (JPEG cm=1, SZ3 cm=8) in the WSL venv
+echo Checking optional backends...
+wsl -d %WSL_DIST_NAME% bash -c "cd '!SCRIPT_PATH_WSL!' && source '%VENV_PATH_WSL%/bin/activate' && python3 install/check_backends.py"
+echo.
+
+REM Choose the interface in a window (Yes = desktop Tkinter, No = web, Cancel = quit).
+REM Pass tk or web as the first argument to skip the window.
+set "FIDWAC_GUI="
+if /i "%~1"=="tk" set "FIDWAC_GUI=tk"
+if /i "%~1"=="web" set "FIDWAC_GUI=web"
+if not defined FIDWAC_GUI (
+    for /f "usebackq delims=" %%c in (`powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0install\choose_gui.ps1"`) do set "FIDWAC_GUI=%%c"
+)
+if not defined FIDWAC_GUI set "FIDWAC_GUI=web"
+if "%FIDWAC_GUI%"=="quit" exit /b 0
+echo Interface: %FIDWAC_GUI%
+echo.
+
 REM Run Linux script in WSL2
 echo Running application in WSL2 distribution: !WSL_DIST_NAME!...
 echo.
-wsl -d %WSL_DIST_NAME% bash -c "export VENV_PATH='%VENV_PATH_WSL%' && cd '!SCRIPT_PATH_WSL!' && bash run_linux.sh"
+wsl -d %WSL_DIST_NAME% bash -c "export VENV_PATH='%VENV_PATH_WSL%' FIDWAC_BACKENDS_CHECKED=1 FIDWAC_GUI='%FIDWAC_GUI%' && cd '!SCRIPT_PATH_WSL!' && bash run_linux.sh"
 
 if errorlevel 1 (
     echo.

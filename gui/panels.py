@@ -1,5 +1,5 @@
 """
-FIDVAC v2 GUI — panel builders
+FIDWAC v2 GUI — panel builders
 ================================
 Mixin class GUIPanels providing:
   _build_main_tab()
@@ -29,8 +29,10 @@ class GUIPanels:
         self.allow_n8 = None
         self.allow_n16 = None
         self.allow_n32 = None
+        self.method = None
         self.accuracy = None
-        self._acc_val_label = None
+        self._acc_text = None
+        self._acc_spin = None
         self.block_size = None
         self.auto_select = None
         self._block_size_cb = None
@@ -66,6 +68,7 @@ class GUIPanels:
         self.processes = None
         self.files_parallel = None
         self.compression_method = None
+        self.lzma2_block_size = None
         self.tiff_compression = None
         self.crs = None
         self._crs_entry = None
@@ -85,10 +88,10 @@ class GUIPanels:
     # =====================================================================
 
     def _build_main_tab(self, parent, cfg):
-        # Input i Output na pełną szerokość
+        # Input and Output, full width
         parent.columnconfigure(0, weight=1)
 
-        # ── INPUT (pełna szerokość) ────────────────────────────────────────
+        # ── INPUT (full width) ──────────────────────────────────────────────
         f = ttk.LabelFrame(parent, text="Input", padding="8", style="Input.TLabelframe")
         f.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 4))
         f.columnconfigure(2, weight=1)
@@ -118,7 +121,7 @@ class GUIPanels:
         )
         self._op_label.grid(row=2, column=0, columnspan=4, sticky=tk.W)
 
-        # ── OUTPUT (pełna szerokość) ───────────────────────────────────────
+        # ── OUTPUT (full width) ─────────────────────────────────────────────
         f = ttk.LabelFrame(parent, text="Output", padding="8", style="Output.TLabelframe")
         f.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 4))
         f.columnconfigure(1, weight=1)
@@ -137,7 +140,7 @@ class GUIPanels:
         )
         self._output_label.grid(row=1, column=0, columnspan=3, sticky=tk.W)
 
-        # ── COMPRESSION SETTINGS (pełna szerokość) ─────────────────────────
+        # ── COMPRESSION SETTINGS (full width) ───────────────────────────────
         fc = ttk.LabelFrame(
             parent, text="Compression Settings", padding="8", style="Compress.TLabelframe"
         )
@@ -175,6 +178,30 @@ class GUIPanels:
 
         self._on_uint8_mode_change()
 
+    def set_accuracy(self, value):
+        """Set the float accuracy from code (preset, button); slider and entry follow."""
+        self.accuracy.set(value)
+        self._acc_text.set(f"{value:.3f}")
+
+    def _follow_typed_accuracy(self):
+        """Move the slider while a valid number is being typed; the text itself is left alone."""
+        try:
+            value = float(self._acc_text.get().replace(",", "."))
+        except ValueError:
+            return
+        if 0.001 <= value <= 1.0 and abs(value - self.accuracy.get()) > 1e-12:
+            self.accuracy.set(value)
+
+    def _commit_accuracy(self):
+        """Take the typed accuracy; an invalid or out-of-range entry reverts to the last valid value."""
+        try:
+            value = float(self._acc_text.get().replace(",", "."))
+        except ValueError:
+            value = None
+        if value is None or not 0.001 <= value <= 1.0:
+            value = self.accuracy.get()
+        self.set_accuracy(value)
+
     def _build_float_section(self, parent, cfg):
         float_frame = ttk.LabelFrame(
             parent,
@@ -185,9 +212,10 @@ class GUIPanels:
         float_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 4))
         float_frame.columnconfigure(1, weight=1)
 
-        # Accuracy slider
-        ttk.Label(float_frame, text="Accuracy:").grid(row=0, column=0, sticky=tk.W, pady=3)
+        # Accuracy: slider, typed value (spinbox) and quick buttons share one variable
+        ttk.Label(float_frame, text="Accuracy (float):").grid(row=0, column=0, sticky=tk.W, pady=3)
         self.accuracy = tk.DoubleVar(value=cfg.compression.accuracy)
+        self._acc_text = tk.StringVar(value=f"{cfg.compression.accuracy:.3f}")
         acc_frame = ttk.Frame(float_frame)
         acc_frame.grid(row=0, column=1, sticky=tk.W)
         _tip(
@@ -198,29 +226,67 @@ class GUIPanels:
                 orient=tk.HORIZONTAL,
                 variable=self.accuracy,
                 length=200,
-                command=lambda v: self._acc_val_label.config(text=f"{float(v):.3f}"),
+                command=lambda v: self._acc_text.set(f"{float(v):.3f}"),
             ),
             "accuracy",
-        ).pack(side=tk.LEFT)
-        self._acc_val_label = ttk.Label(acc_frame, text=f"{cfg.compression.accuracy:.3f}", width=6)
-        self._acc_val_label.pack(side=tk.LEFT, padx=4)
-        for label, val in [("0.01", 0.01), ("0.05", 0.05), ("0.1", 0.1), ("0.5", 0.5)]:
-            ttk.Button(
+        ).grid(row=0, column=0, sticky=tk.W)
+        self._acc_spin = _tip(
+            ttk.Spinbox(
                 acc_frame,
+                from_=0.001,
+                to=1.0,
+                increment=0.01,
+                format="%.3f",
+                textvariable=self._acc_text,
+                width=7,
+                command=self._commit_accuracy,
+            ),
+            "accuracy",
+        )
+        self._acc_spin.grid(row=0, column=1, sticky=tk.W, padx=4)
+        self._acc_spin.bind("<Return>", lambda _e: self._commit_accuracy())
+        self._acc_spin.bind("<FocusOut>", lambda _e: self._commit_accuracy())
+        self._acc_text.trace_add("write", lambda *_a: self._follow_typed_accuracy())
+
+        # Predefined values on their own row so that they are never clipped
+        preset_frame = ttk.Frame(acc_frame)
+        preset_frame.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(3, 0))
+        for label, val in [("0.01", 0.01), ("0.05", 0.05), ("0.1", 0.1), ("0.5", 0.5), ("1.0", 1.0)]:
+            ttk.Button(
+                preset_frame,
                 text=label,
                 width=5,
-                command=lambda v=val: [
-                    self.accuracy.set(v),
-                    self._acc_val_label.config(text=f"{v:.3f}"),
-                ],
+                command=lambda v=val: self.set_accuracy(v),
             ).pack(side=tk.LEFT, padx=1)
 
+        # Compression path selector
+        ttk.Label(float_frame, text="Method:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        self.method = tk.StringVar(value=getattr(cfg.compression, "method", "dct"))
+        method_combo = _tip(
+            ttk.Combobox(
+                float_frame,
+                textvariable=self.method,
+                values=["dct", "pred", "sz3"],
+                width=12,
+                state="readonly",
+            ),
+            "method",
+        )
+        method_combo.grid(row=1, column=1, sticky=tk.W)
+        method_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_uint8_mode_change())
+        ttk.Label(
+            float_frame,
+            text="dct = standard / pred = cm=7 / sz3 = external cm=8",
+            foreground="gray",
+            font=("TkDefaultFont", 8),
+        ).grid(row=1, column=2, sticky=tk.W, padx=(10, 0))
+
         # Block size + auto-select
-        ttk.Label(float_frame, text="Block size:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        ttk.Label(float_frame, text="Block size:").grid(row=2, column=0, sticky=tk.W, pady=3)
         self.block_size = tk.StringVar(value=str(cfg.compression.block_size))
         self.auto_select = tk.BooleanVar(value=cfg.compression.auto_select_block_size)
         bs_frame = ttk.Frame(float_frame)
-        bs_frame.grid(row=1, column=1, sticky=tk.W)
+        bs_frame.grid(row=2, column=1, sticky=tk.W)
         self._block_size_cb = _tip(
             ttk.Combobox(
                 bs_frame,
@@ -244,7 +310,7 @@ class GUIPanels:
         self._on_auto_select_change()
 
         # Backend
-        ttk.Label(float_frame, text="Backend:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Label(float_frame, text="Backend:").grid(row=3, column=0, sticky=tk.W, pady=3)
         self.backend = tk.StringVar(value=cfg.model.backend)
         self._backend_cb = _tip(
             ttk.Combobox(
@@ -256,7 +322,7 @@ class GUIPanels:
             ),
             "backend",
         )
-        self._backend_cb.grid(row=2, column=1, sticky=tk.W, pady=3)
+        self._backend_cb.grid(row=3, column=1, sticky=tk.W, pady=3)
         self._backend_cb.bind("<<ComboboxSelected>>", self._on_backend_change)
 
     def _build_uint8_section(self, parent, cfg):
@@ -330,7 +396,7 @@ class GUIPanels:
         self._rq_label.pack(side=tk.LEFT, padx=4)
 
         # Accuracy spinbox
-        self._u8acc_label_widget = ttk.Label(uint_frame, text="Accuracy:")
+        self._u8acc_label_widget = ttk.Label(uint_frame, text="Accuracy (8-bit):")
         self._u8acc_label_widget.grid(row=2, column=0, sticky=tk.W, pady=3)
         self.uint8_accuracy = tk.IntVar(value=cfg.compression.uint8_accuracy)
         u8acc_frame = ttk.Frame(uint_frame)
@@ -506,6 +572,21 @@ class GUIPanels:
         ).pack(side=tk.LEFT)
         ttk.Label(ff_frame, text="  (1=single, >1=multi)", foreground="gray").pack(side=tk.LEFT)
 
+        ttk.Label(fp, text="GPU:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        self.gpu = tk.StringVar(value="auto")
+        gpu_frame = ttk.Frame(fp)
+        gpu_frame.grid(row=2, column=1, sticky=tk.W)
+        _tip(
+            ttk.Combobox(
+                gpu_frame, textvariable=self.gpu, values=("auto", "on", "off"), width=6,
+                state="readonly",
+            ),
+            "gpu",
+        ).pack(side=tk.LEFT)
+        ttk.Label(gpu_frame, text="  auto = GPU if found, else CPU", foreground="gray").pack(
+            side=tk.LEFT
+        )
+
         # ── RIGHT: Output Settings ────────────────────────────────────────
         fo = ttk.LabelFrame(right, text="Output Settings", padding="8", style="Perf.TLabelframe")
         fo.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=4)
@@ -529,7 +610,20 @@ class GUIPanels:
             "compression_method",
         ).grid(row=0, column=1, sticky=tk.W)
 
-        ttk.Label(fo, text="TIFF compression:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        ttk.Label(fo, text="LZMA2 block size:").grid(row=1, column=0, sticky=tk.W, pady=2)
+        self.lzma2_block_size = tk.StringVar(value=cfg.output.lzma2_block_size)
+        _tip(
+            ttk.Combobox(
+                fo,
+                textvariable=self.lzma2_block_size,
+                values=["", "512k", "1m", "2m", "4m", "8m"],
+                width=10,
+                state="readonly",
+            ),
+            "lzma2_block_size",
+        ).grid(row=1, column=1, sticky=tk.W)
+
+        ttk.Label(fo, text="TIFF compression:").grid(row=2, column=0, sticky=tk.W, pady=2)
         self.tiff_compression = tk.StringVar(value=cfg.output.tiff_compression)
         _tip(
             ttk.Combobox(
@@ -540,12 +634,13 @@ class GUIPanels:
                 state="readonly",
             ),
             "tiff_compression",
-        ).grid(row=1, column=1, sticky=tk.W)
+        ).grid(row=2, column=1, sticky=tk.W)
 
-        ttk.Label(fo, text="CRS (EPSG):").grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Label(fo, text="CRS (EPSG):").grid(row=3, column=0, sticky=tk.W, pady=2)
         crs_frame = ttk.Frame(fo)
-        crs_frame.grid(row=2, column=1, sticky=tk.W)
-        self.crs = tk.StringVar(value=cfg.compression.crs)
+        crs_frame.grid(row=3, column=1, sticky=tk.W)
+        no_crs_init = cfg.compression.crs.strip().lower() == "none"
+        self.crs = tk.StringVar(value="" if no_crs_init else cfg.compression.crs)
         self._crs_entry = _tip(
             ttk.Combobox(
                 crs_frame,
@@ -556,7 +651,9 @@ class GUIPanels:
             "crs_epsg",
         )
         self._crs_entry.pack(side=tk.LEFT)
-        self.no_crs = tk.BooleanVar(value=False)
+        self.no_crs = tk.BooleanVar(value=no_crs_init)
+        if no_crs_init:
+            self._crs_entry.config(state="disabled")
         _tip(
             ttk.Checkbutton(
                 crs_frame,
@@ -569,7 +666,7 @@ class GUIPanels:
 
         self._add_spinbox(
             fo,
-            3,
+            4,
             "Decimal places:",
             "decimal_places",
             cfg.compression.decimal_places,
@@ -581,13 +678,13 @@ class GUIPanels:
         self.delete_temp = tk.BooleanVar(value=cfg.output.delete_temp_files)
         _tip(
             ttk.Checkbutton(fo, text="Delete temp files", variable=self.delete_temp), "delete_temp"
-        ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=2)
+        ).grid(row=5, column=0, columnspan=2, sticky=tk.W, pady=2)
 
         self.quiet = tk.BooleanVar(value=cfg.output.quiet)
         _tip(
             ttk.Checkbutton(fo, text="Quiet mode (suppress log output)", variable=self.quiet),
             "quiet",
-        ).grid(row=5, column=0, columnspan=2, sticky=tk.W)
+        ).grid(row=6, column=0, columnspan=2, sticky=tk.W)
 
         self.show_log_panel = tk.BooleanVar(value=True)
         _tip(
@@ -598,7 +695,7 @@ class GUIPanels:
                 command=self._on_log_panel_toggle,
             ),
             "show_log_panel",
-        ).grid(row=6, column=0, columnspan=2, sticky=tk.W)
+        ).grid(row=7, column=0, columnspan=2, sticky=tk.W)
 
     # =====================================================================
     # BUTTON BAR, PROGRESS, LOG
@@ -667,31 +764,23 @@ class GUIPanels:
         spin.grid(row=row, column=1, sticky=tk.W, pady=2)
         return spin
 
-    def _on_uint8_mode_change(self):
-        """Handle uint8 mode change - enable/disable relevant controls."""
+    def _on_uint8_mode_change(self, _event=None):
+        """Enable only the 8-bit controls the selected method uses.
+
+        dct: quality slider in Quality mode (JPEG for RGB); accuracy field and RGB channels in Accuracy mode.
+        pred / sz3: the accuracy field only, because it sets the error bound of every band.
+        """
         mode = self.uint8_mode.get()
+        dct = self.method.get() == "dct"
+        quality_on = dct and mode == "quality"
+        accuracy_on = (not dct) or mode == "accuracy"
+        rgb_on = dct and mode == "accuracy"
 
-        # Quality slider - only for quality mode
-        if mode == "quality":
-            self._rq_scale.config(state="normal")
-            self._rq_label_widget.config(state="normal")
-        else:
-            self._rq_scale.config(state="disabled")
-            self._rq_label_widget.config(state="disabled")
-
-        # Accuracy spinbox - only for accuracy mode
-        if mode == "accuracy":
-            self._u8acc_spin.config(state="normal")
-            self._u8acc_label_widget.config(state="normal")
-        else:
-            self._u8acc_spin.config(state="disabled")
-            self._u8acc_label_widget.config(state="disabled")
-
-        # RGB channels - only for accuracy mode (YCbCr)
-        if mode == "accuracy":
-            self._u8rgb_label.config(state="normal")
-        else:
-            self._u8rgb_label.config(state="disabled")
+        self._rq_scale.config(state="normal" if quality_on else "disabled")
+        self._rq_label_widget.config(state="normal" if quality_on else "disabled")
+        self._u8acc_spin.config(state="normal" if accuracy_on else "disabled")
+        self._u8acc_label_widget.config(state="normal" if accuracy_on else "disabled")
+        self._u8rgb_label.config(state="normal" if rgb_on else "disabled")
 
     def _on_backend_change(self, event=None):  # pylint: disable=unused-argument
         """Handle backend change - enable/disable advanced heuristic."""

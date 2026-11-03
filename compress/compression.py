@@ -1,5 +1,5 @@
 """
-FIDVAC v2 - Main compression logic (orchestrator)
+FIDWAC v2 - Main compression logic (orchestrator)
 ==================================================
 This module is the single public entry point for compression.
 Actual encoding logic lives in sub-modules:
@@ -10,7 +10,7 @@ Actual encoding logic lives in sub-modules:
   compression_dct.py     — DCT path (float32 elevation + uint8 accuracy, cm=3/5/6)
 
 Compression mode codes (cm):
-  cm=0  Legacy interleaved VLQ stream (no DC prediction, backward compatibility)
+  cm=0  Interleaved VLQ stream without DC prediction (kept for backward compatibility)
   cm=1  TurboJPEG (SIMD) — quality-based JPEG strips via libjpeg-turbo for uint8 RGB.
         No formal max-error guarantee; lossiness depends on JPEG quality parameter.
         Archive format: rgb.bin + meta.msgpack (mode='jpeg_strips'), not the standard
@@ -37,6 +37,7 @@ import msgpack
 
 from engine.utils import numpy_to_python
 from config import Config
+from compress.output_crs import crs_label, resolve_output_crs
 
 from .compression_utils import (
     RASTER_EXTENSIONS,
@@ -46,9 +47,11 @@ from .compression_utils import (
 )
 from .compression_jpeg import compress_jpeg_path
 from .compression_lossless import compress_channel_lossless
+from . import compression_dct
 from .compression_dct import (
     compress_channel_dct,
     compress_channel_dct_streaming,
+    compress_channel_dct_strips,
 )
 
 # ---------------------------------------------------------------------------
@@ -94,7 +97,7 @@ def compress_image(
       - uint8 any bands, lossless          → deflate per-band (cm=4)
       - uint8 any bands, accuracy mode     → DCT binary search (cm=5)
       - float32/64 elevation               → DCT binary search (cm=3)
-      - legacy / no cm field               → interleaved VLQ (cm=0)
+      - no cm field (older files)          → interleaved VLQ (cm=0)
 
     For large rasters (>256 MB/channel) uses streaming via rasterio Window.
     """
@@ -114,6 +117,7 @@ def compress_image(
         print(f"Loading: {file_path}")
 
     src, meta = _open_raster(file_path, config)
+    config._source_has_nodata = meta["has_nodata"]
     H, W = meta["H"], meta["W"]
 
     # Route to JPEG path for uint8 RGB (exactly 3 data bands, quality mode)
@@ -193,19 +197,11 @@ def _open_raster(file_path: str, config: Config):
 
     file_crs = src.crs
     transform = src.transform
-    override_crs = config.compression.crs
-    if override_crs == "":
-        raster_crs = None
-    elif override_crs:
-        raster_crs = override_crs
-    else:
-        raster_crs = str(file_crs) if file_crs else None
-    if raster_crs is None and transform.is_identity:
-        raster_crs = None
+    raster_crs = resolve_output_crs(file_crs, config.compression.crs)
 
     if not config.output.quiet and file_crs is None and not transform.is_identity:
-        crs_src = f"config ({override_crs})" if override_crs else "UNKNOWN"
-        print(f"  WARNING: no CRS in file — transform from world file, CRS from {crs_src}")
+        out_crs = "none" if raster_crs is None else raster_crs.to_string()
+        print(f"  WARNING: no CRS in file — transform from world file, output CRS: {out_crs}")
 
     channel_bytes = H * W * 4
     use_streaming = channel_bytes > _STREAMING_THRESHOLD
@@ -272,9 +268,14 @@ def _compress_per_channel_rgb(
     # Build YCbCr images for standard channels
     from .compression_dct import build_ycbcr_images
 
-    ycbcr_images, ycbcr_acc, _ = build_ycbcr_images(
-        src, config, num_channels, all_uint8, data_band_indices
-    )
+    if len(rgb_channels) == 3:
+        # The YCbCr images only exist for the three RGB channels, which compress_channel_rgb
+        # (cm=6) handles itself; the loop over the other channels never looks them up.
+        ycbcr_images, ycbcr_acc = {}, {}
+    else:
+        ycbcr_images, ycbcr_acc, _ = build_ycbcr_images(
+            src, config, num_channels, all_uint8, data_band_indices
+        )
 
     # Collect all channel data - one entry per channel
     channels_data = [None] * num_channels
@@ -286,26 +287,6 @@ def _compress_per_channel_rgb(
         r_idx, g_idx, b_idx = rgb_channels
         if not config.output.quiet:
             print("  Compressing RGB channels with per-block YCbCr...")
-
-        # Memory estimation: compress_channel_rgb loads 3 channels as float32
-        # plus 3 YCbCr float32 = 6 × H × W × 4 bytes, plus block tuples overhead.
-        # Warn if estimated memory exceeds 50% of available RAM.
-        import os as _os
-
-        _rgb_mem_bytes = 6 * H * W * 4
-        _available_mem = getattr(_os, "sysconf", lambda *_: 0)
-        try:
-            _avail_ram = _os.sysconf(_os.sysconf_names["SC_AVPHYS_PAGES"]) * _os.sysconf(_os.sysconf_names["SC_PAGE_SIZE"])
-        except (KeyError, ValueError, AttributeError):
-            _avail_ram = 0
-        if _avail_ram > 0 and _rgb_mem_bytes > _avail_ram * 0.5:
-            _rgb_mem_gb = _rgb_mem_bytes / (1024 ** 3)
-            _avail_gb = _avail_ram / (1024 ** 3)
-            print(
-                f"  ⚠ WARNING: RGB in-memory compression requires ~{_rgb_mem_gb:.1f} GB RAM,"
-                f" but only {_avail_gb:.1f} GB available."
-            )
-            print("  If the process is killed (OOM), reduce block_size or use a smaller file.")
 
         # Prepare custom config with adaptive scaling-factor fallback.
         # cm=6 validates final RGB error, so sf=1 can be too coarse for strict accuracy=2.
@@ -348,7 +329,7 @@ def _compress_per_channel_rgb(
         # Build channel data for RGB (single "channel" containing all 3)
         ch_data = {
             "l": lengths,
-            "cm": 6,  # New mode: per-block YCbCr
+            "cm": 6,  # per-block YCbCr
             "m": masks_data,
             "bs": block_size,
             "sf": coeffs_dict["sf"],
@@ -356,6 +337,13 @@ def _compress_per_channel_rgb(
 
         # Encode coefficients with per-block multipliers
         ch_data = _encode_dct_channel_rgb(ch_data, coeffs_dict, block_size, padded_shape, u8_cfg)
+        if coeffs_dict.get("nd") is not None:
+            ch_data["nd"] = coeffs_dict["nd"]  # per-band NoData RLE masks (R, G, B)
+            flips = _rgb_nodata_flips(
+                ch_data, block_size, padded_shape, src, (r_idx, g_idx, b_idx), nodata_value
+            )
+            if flips is not None:
+                ch_data["nu"] = flips
 
         # Store in first RGB slot; other RGB slots get empty marker
         channels_data[rgb_channels[0]] = ch_data
@@ -467,7 +455,7 @@ def _compress_per_channel(
         and all_uint8
         and num_channels >= 3
     ):
-        # Use new per-block RGB path
+        # per-block RGB path
         return _compress_per_channel_rgb(
             src, file_path, meta, config, num_processes, output_dir, start_time, skip_archive
         )
@@ -581,26 +569,50 @@ def _compress_one_channel(
             )
         )
         ch_data = {"l": lengths, "cm": 5, "m": masks_data, "bs": block_size}
+        if ch_dtype != "uint8":
+            ch_data["dt"] = ch_dtype  # integer range for the decoder (uint8 when absent)
         if ch_sf is not None:
             ch_data["sf"] = ch_sf
 
     elif use_streaming:
-        lengths, coeffs_np, masks_data, max_err, validity, block_size, padded_shape = (
-            compress_channel_dct_streaming(
-                src, band_idx, block_size, nodata_value, config, num_processes, src_dtype=ch_dtype
+        base_dec = config.compression.decimal_places
+        dec = base_dec
+        for i, dec in enumerate([base_dec, base_dec + 1, base_dec + 2, base_dec + 3]):
+            ch_cfg = deepcopy(config)
+            ch_cfg.compression.decimal_places = dec
+            lengths, coeffs_np, masks_data, max_err, validity, block_size, padded_shape = (
+                compress_channel_dct_streaming(
+                    src, band_idx, block_size, nodata_value, ch_cfg, num_processes, src_dtype=ch_dtype
+                )
             )
-        )
+            if validity:
+                break
+            if not config.output.quiet:
+                print(f"  dec={dec} does not meet the accuracy (max_err={max_err:.4g}), retrying with dec={dec + 1}")
         ch_data = {"l": lengths, "cm": 3, "m": masks_data, "bs": block_size}
+        if dec != base_dec:
+            ch_data["sf"] = 10 ** dec
 
     else:
         image_ch = src.read(band_idx).astype(np.float32)
-        lengths, coeffs_np, masks_data, max_err, validity, block_size, padded_shape = (
-            compress_channel_dct(
-                image_ch, block_size, nodata_value, config, num_processes, src_dtype=ch_dtype
+        base_dec = config.compression.decimal_places
+        dec = base_dec
+        for i, dec in enumerate([base_dec, base_dec + 1, base_dec + 2, base_dec + 3]):
+            ch_cfg = deepcopy(config)
+            ch_cfg.compression.decimal_places = dec
+            lengths, coeffs_np, masks_data, max_err, validity, block_size, padded_shape = (
+                compress_channel_dct(
+                    image_ch, block_size, nodata_value, ch_cfg, num_processes, src_dtype=ch_dtype
+                )
             )
-        )
+            if validity:
+                break
+            if not config.output.quiet:
+                print(f"  dec={dec} does not meet the accuracy (max_err={max_err:.4g}), retrying with dec={dec + 1}")
         del image_ch
         ch_data = {"l": lengths, "cm": 3, "m": masks_data, "bs": block_size}
+        if dec != base_dec:
+            ch_data["sf"] = 10 ** dec
 
     return ch_data, coeffs_np, block_size, padded_shape, max_err, validity
 
@@ -621,11 +633,15 @@ def _compress_uint8_accuracy(
     u8_accuracy = float(getattr(config.compression, "uint8_accuracy", 1))
     u8_sf_cfg = getattr(config.compression, "uint8_scaling_factor", 1)
 
+    # A band above DCT_STRIP_PIXELS is compressed strip by strip, so it never sits in memory whole.
+    # (The globally decorrelated YCbCr images are already in memory.)
+    by_strips = False
     if ycbcr_images is not None and ch_idx_0 in ycbcr_images:
         image_ch = ycbcr_images[ch_idx_0]
         u8_accuracy = ycbcr_acc[ch_idx_0]
     else:
-        image_ch = src.read(band_idx).astype(np.float32)
+        by_strips = src.height * src.width > compression_dct.DCT_STRIP_PIXELS
+        image_ch = None if by_strips else src.read(band_idx).astype(np.float32)
 
     # Determine scaling factors to try
     if isinstance(u8_sf_cfg, list):
@@ -652,11 +668,18 @@ def _compress_uint8_accuracy(
         else:
             u8_cfg.compression.decimal_places = 0
 
-        lengths, coeffs_np, masks_data, max_err, validity, block_size, padded_shape = (
-            compress_channel_dct(
-                image_ch, block_size, nodata_value, u8_cfg, num_processes, src_dtype=ch_dtype
+        if by_strips:
+            lengths, coeffs_np, masks_data, max_err, validity, block_size, padded_shape = (
+                compress_channel_dct_strips(
+                    src, band_idx, block_size, nodata_value, u8_cfg, num_processes, src_dtype=ch_dtype
+                )
             )
-        )
+        else:
+            lengths, coeffs_np, masks_data, max_err, validity, block_size, padded_shape = (
+                compress_channel_dct(
+                    image_ch, block_size, nodata_value, u8_cfg, num_processes, src_dtype=ch_dtype
+                )
+            )
         del u8_cfg
 
         ch_sf = try_sf
@@ -672,6 +695,34 @@ def _compress_uint8_accuracy(
 
     del image_ch
     return lengths, coeffs_np, masks_data, max_err, validity, block_size, padded_shape, ch_sf
+
+
+def _rgb_nodata_flips(ch_data, block_size, padded_shape, src, rgb_idx, nodata_value):
+    """cm=6 with NoData inside 1..254: per-band RLE of valid pixels that decode to NoData and lie
+    below it, so the decoder steps them down instead of up (see _apply_rgb_nodata). The archive
+    is decoded with the decoder's own function, strip by strip, so the masks match its output exactly."""
+    if not (0 < nodata_value < 255):
+        return None
+    from rasterio.windows import Window
+
+    from engine.utils import RleBuilder, decode_mask_rle_rows
+    from .decompression import _iter_rgb_strips
+
+    H, W = src.height, src.width
+    builders = [RleBuilder() for _ in range(3)]
+    any_flip = False
+    for y0, *planes in _iter_rgb_strips(ch_data, block_size, tuple(padded_shape), (H, W)):
+        h = planes[0].shape[0]
+        for plane, band_idx, rle, builder in zip(planes, rgb_idx, ch_data["nd"], builders):
+            orig = src.read(band_idx + 1, window=Window(0, y0, W, h))
+            flip = (
+                (plane == nodata_value)
+                & ~decode_mask_rle_rows(rle, W, y0, h)
+                & (orig < nodata_value)
+            )
+            any_flip |= bool(np.any(flip))
+            builder.add(flip)
+    return [builder.result() for builder in builders] if any_flip else None
 
 
 def _encode_dct_channel_rgb(
@@ -712,14 +763,9 @@ def _encode_dct_channel_rgb(
         else:
             encoded_channels[ch] = b""
 
-    # Flatten multipliers per channel
-    mult_y = np.asarray(coeffs_dict["Y"]["multipliers"], dtype=np.float32).tobytes()
-    mult_cb = np.asarray(coeffs_dict["Cb"]["multipliers"], dtype=np.float32).tobytes()
-    mult_cr = np.asarray(coeffs_dict["Cr"]["multipliers"], dtype=np.float32).tobytes()
-    fallback = np.asarray(coeffs_dict["fallback"], dtype=np.bool_).tobytes()
-
-    # Store encoded data as flat list:
-    # [Y_dc, Y_ac, Cb_dc, Cb_ac, Cr_dc, Cr_ac, mult_y, mult_cb, mult_cr, fallback]
+    # Store encoded data as flat list. Per-block multipliers and fallback flags are not stored:
+    # the decoder does not use them (the coefficients are already quantized).
+    # [Y_dc, Y_ac, Cb_dc, Cb_ac, Cr_dc, Cr_ac]
     ch_data["c"] = [
         encoded_channels["Y"][0] if isinstance(encoded_channels["Y"], list) else b"",
         encoded_channels["Y"][1] if isinstance(encoded_channels["Y"], list) else b"",
@@ -727,10 +773,6 @@ def _encode_dct_channel_rgb(
         encoded_channels["Cb"][1] if isinstance(encoded_channels["Cb"], list) else b"",
         encoded_channels["Cr"][0] if isinstance(encoded_channels["Cr"], list) else b"",
         encoded_channels["Cr"][1] if isinstance(encoded_channels["Cr"], list) else b"",
-        mult_y,
-        mult_cb,
-        mult_cr,
-        fallback,
     ]
 
     # Flatten lengths: [Y_lengths, Cb_lengths, Cr_lengths]
@@ -795,7 +837,7 @@ def _finalize_dct_archive(
         "s": [H, W],
         "p": [H, W],  # padded_shape placeholder; real value per channel
         "t": list(transform)[:6],
-        "r": str(raster_crs) if raster_crs else config.compression.crs,
+        "r": None if raster_crs is None else raster_crs.to_string(),
         "d": nodata_value if has_nodata else None,
         "dn": has_nodata,
         "f": config.scaling_factor,
@@ -808,7 +850,7 @@ def _finalize_dct_archive(
     dcv_compress = numpy_to_python(dcv_compress)
 
     output_path = _build_dct_output_path(
-        file_path, config, output_dir, channel_block_sizes, all_uint8, u8_accuracy_mode
+        file_path, config, output_dir, channel_block_sizes, all_uint8, u8_accuracy_mode, crs=raster_crs
     )
     validity_suffix = _validity_suffix(config, all_valid)
     # Re-build with validity suffix
@@ -820,6 +862,7 @@ def _finalize_dct_archive(
         all_uint8,
         u8_accuracy_mode,
         validity_suffix=validity_suffix,
+        crs=raster_crs,
     )
 
     if not config.output.quiet:
@@ -849,7 +892,8 @@ def _finalize_dct_archive(
     del packed_data
 
     method = config.output.compression_method.upper()
-    pack_to_7z(output_path, temp_msgpack, store=False, method=method)
+    pack_to_7z(output_path, temp_msgpack, store=False, method=method,
+               lzma2_block_size=config.output.lzma2_block_size)
 
     if config.output.delete_temp_files:
         remove_if_exists(temp_msgpack)
@@ -877,6 +921,10 @@ def _assemble_channels(dcv_compress, ch_data_list, num_channels):
         dcv_compress["m"] = ch_packed.get("m", [])
         if "cm" in ch_packed:
             dcv_compress["cm"] = ch_packed["cm"]
+        if "sf" in ch_packed:
+            dcv_compress["sf"] = ch_packed["sf"]
+        if "dt" in ch_packed:
+            dcv_compress["dt"] = ch_packed["dt"]
     else:
         dcv_compress["channels"] = ch_data_list
     return dcv_compress
@@ -896,9 +944,10 @@ def _build_dct_output_path(
     all_uint8,
     u8_accuracy_mode,
     validity_suffix="VT",
+    crs=None,
 ):
     base_name = os.path.splitext(os.path.basename(file_path))[0]
-    crs_clean = config.compression.crs.replace(":", "")
+    crs_clean = crs_label(crs)
 
     if config.compression.auto_select_block_size:
         mode_suffix = "AUTO"

@@ -1,5 +1,5 @@
 """
-FIDVAC v2 - ZigZag + VLQ codec
+FIDWAC v2 - ZigZag + VLQ codec
 
 int → ZigZag → uint → VLQ bytes
 Small values (±63) fit in 1 byte; ~91% of DCT coefficients → 3-4× smaller than raw int32.
@@ -17,8 +17,8 @@ import numba as nb
 @nb.njit(cache=True)
 def _nb_encode_vlq(u: np.ndarray, buf: np.ndarray) -> int:
     """
-    Zapisuje tablice uint64 jako VLQ bytes do buf.
-    Zwraca liczbe zapisanych bajtow.
+    Writes uint64 arrays into buf as VLQ bytes.
+    Returns the number of bytes written.
     """
     pos = 0
     for v in u:
@@ -34,8 +34,8 @@ def _nb_encode_vlq(u: np.ndarray, buf: np.ndarray) -> int:
 @nb.njit(cache=True)
 def _nb_zigzag_encode_vlq(values: np.ndarray, buf: np.ndarray) -> int:
     """
-    ZigZag + VLQ encode w jednym przejsciu (int64 -> bytes).
-    Zwraca liczbe zapisanych bajtow.
+    ZigZag and VLQ encode in a single pass (int64 -> bytes).
+    Returns the number of bytes written.
     """
     pos = 0
     for sv in values:
@@ -49,11 +49,11 @@ def _nb_zigzag_encode_vlq(values: np.ndarray, buf: np.ndarray) -> int:
     return pos
 
 
-@nb.njit(cache=True)
+@nb.njit(cache=True, nogil=True)
 def _nb_decode_vlq(data: np.ndarray, n: int, out: np.ndarray) -> int:
     """
-    Dekoduje VLQ bytes -> uint64 array out.
-    Zwraca liczbe zdekodowanych wartosci.
+    Decodes VLQ bytes into the uint64 array out.
+    Returns the number of decoded values.
     """
     i = 0
     count = 0
@@ -72,7 +72,7 @@ def _nb_decode_vlq(data: np.ndarray, n: int, out: np.ndarray) -> int:
     return count
 
 
-# Warm-up JIT przy imporcie
+# Warm up the JIT-compiled functions at import time
 _dummy_u = np.zeros(1, dtype=np.uint64)
 _dummy_buf = np.zeros(5, dtype=np.uint8)
 _nb_encode_vlq(_dummy_u, _dummy_buf)
@@ -102,16 +102,20 @@ def encode_vlq(values: List[int]) -> bytes:
     return bytes(buf[:pos])
 
 
-def decode_vlq(data: Union[bytes, bytearray, memoryview]) -> List[int]:
-    """Decode bytes → signed int list via VLQ + ZigZag."""
+def decode_vlq_array(data: Union[bytes, bytearray, memoryview]) -> np.ndarray:
+    """Decode bytes → signed int64 array via VLQ + ZigZag."""
     if not data:
-        return []
+        return np.empty(0, dtype=np.int64)
     arr = np.frombuffer(data, dtype=np.uint8)
     out = np.empty(len(arr), dtype=np.uint64)  # worst case: 1 value per byte
     count = _nb_decode_vlq(arr, len(arr), out)
     u = out[:count]
-    signed = np.where((u & 1) == 0, (u >> 1).astype(np.int64), -((u >> 1) + 1).astype(np.int64))
-    return signed.tolist()
+    return np.where((u & 1) == 0, (u >> 1).astype(np.int64), -((u >> 1) + 1).astype(np.int64))
+
+
+def decode_vlq(data: Union[bytes, bytearray, memoryview]) -> List[int]:
+    """Decode bytes → signed int list via VLQ + ZigZag."""
+    return decode_vlq_array(data).tolist()
 
 
 # =============================================================================
@@ -216,7 +220,7 @@ def _nb_dc_median_ac_encode(
     return dc_pos, ac_pos
 
 
-@nb.njit(cache=True)
+@nb.njit(cache=True, nogil=True)
 def _nb_dc_median_ac_decode(
     dc_deltas: np.ndarray,
     ac_values: np.ndarray,
@@ -273,7 +277,7 @@ def _nb_dc_median_ac_decode(
     return coeff_pos
 
 
-# Warm-up new JIT functions
+# Warm up the JIT-compiled functions
 _dummy_len = np.array([1], dtype=np.int64)
 _dummy_c = np.array([42], dtype=np.int64)
 _dummy_dc_buf = np.zeros(5, dtype=np.uint8)
@@ -331,12 +335,8 @@ def dc_median_ac_decode(
     -------
     np.ndarray (int64) — flat coefficient stream (DC restored, AC in place)
     """
-    dc_deltas = (
-        np.array(decode_vlq(dc_data), dtype=np.int64) if dc_data else np.empty(0, dtype=np.int64)
-    )
-    ac_values = (
-        np.array(decode_vlq(ac_data), dtype=np.int64) if ac_data else np.empty(0, dtype=np.int64)
-    )
+    dc_deltas = decode_vlq_array(dc_data)
+    ac_values = decode_vlq_array(ac_data)
     lengths_arr = np.asarray(lengths, dtype=np.int64)
     total_coeffs = int(np.sum(lengths_arr[lengths_arr > 0]))
     out_coeffs = np.empty(max(total_coeffs, 1), dtype=np.int64)

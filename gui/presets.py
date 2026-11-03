@@ -1,5 +1,5 @@
 """
-FIDVAC v2 GUI — preset configurations
+FIDWAC v2 GUI — preset configurations
 ======================================
 Mixin class GUIPresets providing:
   _build_presets_panel()
@@ -106,8 +106,7 @@ class GUIPresets:
 
         # Apply float settings
         if "accuracy" in preset:
-            self.accuracy.set(preset["accuracy"])
-            self._acc_val_label.config(text=f"{preset['accuracy']:.3f}")
+            self.set_accuracy(preset["accuracy"])
 
         if "block_size" in preset:
             self.block_size.set(str(preset["block_size"]))

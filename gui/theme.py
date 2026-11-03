@@ -1,5 +1,5 @@
 """
-FIDVAC v2 GUI — Material Design theme
+FIDWAC v2 GUI — Material Design theme
 """
 
 from tkinter import ttk

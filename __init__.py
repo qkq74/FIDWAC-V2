@@ -1,5 +1,5 @@
 """
-FIDVAC v2 - DCT compression for geospatial data.
+FIDWAC v2 - DCT compression for geospatial data.
 
 Modules: core, compression, decompression, predictor, refine, blocks, utils, config
 Prediction backends: heuristic (variance-based), advanced heuristic (lookup table)

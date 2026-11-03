@@ -1,10 +1,10 @@
 """
-FIDVAC v2 - Configuration management
+FIDWAC v2 - Configuration management
 """
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Optional, Dict, Any
 from pathlib import Path
 
@@ -23,11 +23,12 @@ class DirectoriesConfig:
 class CompressionConfig:
     """Compression parameters."""
 
+    method: str = "dct"  # dct: block DCT (default); pred: near-lossless predictive mode (cm=7); sz3: SZ3 with an absolute error bound (cm=8)
     accuracy: float = 0.05
     block_size: int = 16
     decimal_places: int = 2
     dct_type: int = 2
-    crs: str = "epsg:2180"
+    crs: str = ""  # "" = CRS of the input file, "none" = no CRS, or an EPSG/WKT string
     auto_select_block_size: bool = False
     auto_select_sample_size: int = 1000  # config.json default
     auto_select_std_threshold_high: float = 10.0
@@ -41,26 +42,25 @@ class CompressionConfig:
     uint8_scaling_factor: Any = (
         1  # Scaling factor or list of scaling factors for uint8 DCT coefficients (lower = smaller file, 1 = optimal for pixel accuracy)
     )
-    ycbcr_y_multiplier: float = 0.9  # YCbCr Y channel accuracy multiplier (1.0 = use full accuracy)
+    ycbcr_y_multiplier: float = 1.0  # Accuracy multiplier for Y channel validation; not the RGB->YCbCr conversion coefficient.
     ycbcr_cb_multiplier: float = (
-        0.9  # YCbCr Cb channel accuracy multiplier (1.0 = use full accuracy)
+        1.0  # Accuracy multiplier for Cb channel validation; not the RGB->YCbCr conversion coefficient.
     )
     ycbcr_cr_multiplier: float = (
-        0.9  # YCbCr Cr channel accuracy multiplier (1.0 = use full accuracy)
+        1.0  # Accuracy multiplier for Cr channel validation; not the RGB->YCbCr conversion coefficient.
     )
     ycbcr_fallback_multipliers: list = field(
         default_factory=lambda: [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
     )
     ycbcr_per_block_mode: bool = True
+    ycbcr_decode_verify: bool = True  # Verify the accepted RGB candidate with the same reconstruction as the decoder.
+    uint8_zero_mask: bool = False  # Store a zero mask for uint8 blocks that mix zeros with data (exact zeros, larger archive)
     allowed_block_sizes: list = field(
         default_factory=lambda: [8, 16, 32]
     )  # Allowed N values for auto-select
     rgb_channel_indices: list = field(
-        default_factory=list
+        default_factory=lambda: [1, 2, 3]
     )  # [1,2,3] = R,G,B channels (1-based); empty = disabled
-    rgb_strip_height_px: int = (
-        2048  # Target RGB strip height in pixels (used as an upper bound, memory-safe capped)
-    )
 
 
 @dataclass
@@ -68,6 +68,7 @@ class PerformanceConfig:
     """Performance parameters."""
 
     num_processes: str = "auto"
+    gpu: str = "auto"  # auto: GPU when available (else CPU with a note), on: required, off: CPU
     fast_eval_basis: bool = True
     verify_with_full_idct: bool = True
     l2_precheck_enabled: bool = True
@@ -100,7 +101,38 @@ class OutputConfig:
     quiet: bool = False
     delete_temp_files: bool = True
     compression_method: str = "LZMA2"  # LZMA2, PPMD, BZIP2, DEFLATE
+    # LZMA2 block (chunk) size of the .7z archive, e.g. "1m", "2m", "4m"; "" = 7-Zip default.
+    # Smaller blocks compress many times faster (7-Zip compresses blocks in parallel) with nearly the
+    # same archive size; the archive stays a standard LZMA2 .7z.
+    lzma2_block_size: str = "2m"
     tiff_compression: str = "DEFLATE"  # DEFLATE, LZW, LZMA, ZSTD, NONE
+
+
+@dataclass
+class InterpolationConfig:
+    """IDW interpolation of scattered points (defaults of ZSIP/FIDWaC interpolation.py)."""
+
+    z_field_name: str = "z"  # z attribute of SHP files
+    filter_las: bool = False  # keep only filter_classes of LAS/LAZ points
+    filter_classes: list = field(default_factory=lambda: [2])
+    neighbours: int = 10  # N nearest points per cell
+    resolution: float = 0.5  # cell size, in units of source_crs
+    max_distance: float = 5.0  # search radius, in units of source_crs
+    weights: float = 2.0  # power p of the IDW weights 1 / d^p
+    leafsize: int = 10  # KD-tree leaf size
+    r_min_function: bool = False  # reduce distances below r_min
+    r_min: float = 0.5
+    smooth_result: bool = True  # Gaussian smoothing of the grid
+    smooth_level: float = 1.0  # Gaussian sigma, in cells
+    geoid_correction: bool = False  # subtract geoid undulation from z
+    geoid_correction_file: str = "interpolation/geoid/PL_geod.7z"  # .7z or text x y z; relative to the project
+    source_crs: str = "epsg:2180"
+    geoid_crs: str = "epsg:4326"
+    geoid_max_distance: float = 2000.0  # geoid points farther than this are not used
+    csv_result: bool = False  # default for the extra CSV output
+    surfer_grd: bool = False  # default for the extra Surfer grid output
+    save_points_shp: bool = False  # default for the extra points shapefile output
+    preview_png: bool = False  # default for the extra PNG preview output
 
 
 @dataclass
@@ -112,7 +144,9 @@ class Config:
     performance: PerformanceConfig = field(default_factory=PerformanceConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    interpolation: InterpolationConfig = field(default_factory=InterpolationConfig)
     _scaling_factor_override: Optional[int] = None
+    _source_has_nodata: bool = True  # set per file by compress_image; False = NoData is only the internal sentinel
 
     @property
     def results_dir(self) -> str:
@@ -153,6 +187,49 @@ class Config:
         return int(self.performance.num_processes)
 
 
+_GPU_MODE = {"value": "auto"}
+_GPU_VALUES = ("auto", "on", "off")
+
+
+def _gpu_value(value) -> str:
+    """performance.gpu: 'auto' | 'on' | 'off' (true/false are accepted as on/off)."""
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    text = str(value).strip().lower()
+    if text not in _GPU_VALUES:
+        raise ValueError(f"performance.gpu must be one of {_GPU_VALUES}, got {value!r}")
+    return text
+
+
+def set_gpu_mode(value) -> None:
+    """Set the GPU mode used by the batch path (engine.gpu_u8.phases)."""
+    _GPU_MODE["value"] = _gpu_value(value)
+
+
+def gpu_mode() -> str:
+    return _GPU_MODE["value"]
+
+
+def _gpu_backend_available() -> bool:
+    """True when the GPU batch path can run (library present, CUDA device answers, performance.gpu != off)."""
+    try:
+        from engine.gpu_u8 import phases  # local import: engine imports this module
+
+        return phases.available()
+    except Exception:  # noqa: BLE001  (no GPU stack: CPU only)
+        return False
+
+
+def _resolve_L_prediction(requested) -> bool:
+    """L prediction is a CPU option. With a GPU backend it is switched off (the GPU batch path does
+    not use it, and it was slower and larger in measurements); on CPU it follows the config."""
+    enabled = bool(requested)
+    if enabled and _gpu_backend_available():
+        print("  note: uint8 L prediction is off when a GPU backend is used (set performance.gpu to off to run it on CPU)")
+        return False
+    return enabled
+
+
 def load_config(config_path: Optional[str] = None) -> Config:
     """Load config from JSON file; falls back to defaults if not found."""
     if config_path is None:
@@ -186,11 +263,12 @@ def _parse_config(data: Dict[str, Any]) -> Config:
 
     comp = data.get("compression", {})
     compression = CompressionConfig(
+        method=comp.get("method", "dct"),
         accuracy=comp.get("accuracy", 0.05),
         block_size=comp.get("block_size", 16),
         decimal_places=comp.get("decimal_places", 2),
         dct_type=comp.get("dct_type", 2),
-        crs=comp.get("crs", "epsg:2180"),
+        crs=comp.get("crs", ""),
         auto_select_block_size=comp.get("auto_select_block_size", False),
         auto_select_sample_size=comp.get("auto_select_sample_size", 1000),
         auto_select_std_threshold_high=comp.get("auto_select_std_threshold_high", 10.0),
@@ -204,31 +282,27 @@ def _parse_config(data: Dict[str, Any]) -> Config:
             "ycbcr_fallback_multipliers", [1.0, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1]
         ),
         ycbcr_per_block_mode=comp.get("ycbcr_per_block_mode", True),
+        ycbcr_decode_verify=bool(comp.get("ycbcr_decode_verify", True)),
+        uint8_zero_mask=bool(comp.get("uint8_zero_mask", False)),
     )
     fallback_mults = compression.ycbcr_fallback_multipliers
     default_initial = fallback_mults[0] if fallback_mults else 0.9
 
-    compression.ycbcr_y_multiplier = comp.get("ycbcr_y_multiplier", default_initial)
-    compression.ycbcr_cb_multiplier = comp.get("ycbcr_cb_multiplier", default_initial)
-    compression.ycbcr_cr_multiplier = comp.get("ycbcr_cr_multiplier", default_initial)
+    compression.ycbcr_y_multiplier = comp.get("ycbcr_y_multiplier", 1.0)
+    compression.ycbcr_cb_multiplier = comp.get("ycbcr_cb_multiplier", 1.0)
+    compression.ycbcr_cr_multiplier = comp.get("ycbcr_cr_multiplier", 1.0)
+    compression.rgb_channel_indices = comp.get("rgb_channel_indices", [1, 2, 3])
     compression.allowed_block_sizes = comp.get("allowed_block_sizes", [8, 16, 32])
-    compression.rgb_channel_indices = comp.get("rgb_channel_indices", [])
-    rgb_strip_height_px = comp.get(
-        "rgb_strip_height_px", comp.get("rgb_strip_memory_fraction", 2048)
-    )
-    try:
-        compression.rgb_strip_height_px = int(rgb_strip_height_px)
-    except (TypeError, ValueError):
-        compression.rgb_strip_height_px = 2048
-    if compression.rgb_strip_height_px < 8:
-        compression.rgb_strip_height_px = 2048
 
     perf = data.get("performance", {})
     parallel = perf.get("parallel", {})
+    gpu_mode = _gpu_value(perf.get("gpu", "auto"))
+    set_gpu_mode(gpu_mode)
     optimizations = perf.get("optimizations", {})
 
     performance = PerformanceConfig(
         num_processes=str(parallel.get("num_processes", "auto")),
+        gpu=gpu_mode,
         fast_eval_basis=optimizations.get("fast_eval_basis", True),
         verify_with_full_idct=optimizations.get("verify_with_full_idct", True),
         l2_precheck_enabled=optimizations.get("l2_precheck_enabled", True),
@@ -250,7 +324,7 @@ def _parse_config(data: Dict[str, Any]) -> Config:
         accept_prediction_if_within_accuracy=mod.get(
             "accept_prediction_if_within_accuracy", mod.get("accept_ai_if_within_accuracy", False)
         ),
-        uint8_use_L_prediction=mod.get("uint8_use_L_prediction", True),
+        uint8_use_L_prediction=_resolve_L_prediction(mod.get("uint8_use_L_prediction", False)),
         uint8_L_prediction_scales=[float(x) for x in l_scales],
     )
 
@@ -259,7 +333,13 @@ def _parse_config(data: Dict[str, Any]) -> Config:
         quiet=out.get("quiet", False),
         delete_temp_files=out.get("delete_temp_files", True),
         compression_method=out.get("compression_method", "LZMA2"),
+        lzma2_block_size=str(out.get("lzma2_block_size", "2m") or ""),
         tiff_compression=out.get("tiff_compression", "DEFLATE"),
+    )
+
+    ip = data.get("interpolation", {})
+    interpolation = InterpolationConfig(
+        **{key: value for key, value in ip.items() if key in InterpolationConfig.__dataclass_fields__}
     )
 
     return Config(
@@ -268,6 +348,7 @@ def _parse_config(data: Dict[str, Any]) -> Config:
         performance=performance,
         model=model,
         output=output,
+        interpolation=interpolation,
     )
 
 
@@ -281,6 +362,7 @@ def save_config(config: Config, config_path: str) -> None:
             "cache": config.cache_dir,
         },
         "compression": {
+            "method": config.compression.method,
             "accuracy": config.compression.accuracy,
             "block_size": config.compression.block_size,
             "decimal_places": config.compression.decimal_places,
@@ -297,13 +379,14 @@ def save_config(config: Config, config_path: str) -> None:
             "uint8_scaling_factor": config.compression.uint8_scaling_factor,
             "ycbcr_fallback_multipliers": (config.compression.ycbcr_fallback_multipliers),
             "ycbcr_per_block_mode": config.compression.ycbcr_per_block_mode,
+            "uint8_zero_mask": config.compression.uint8_zero_mask,
             "allowed_block_sizes": config.compression.allowed_block_sizes,
-            "rgb_strip_height_px": config.compression.rgb_strip_height_px,
         },
         "performance": {
             "parallel": {
                 "num_processes": config.performance.num_processes,
             },
+            "gpu": config.performance.gpu,
             "optimizations": {
                 "fast_eval_basis": config.performance.fast_eval_basis,
                 "verify_with_full_idct": config.performance.verify_with_full_idct,
@@ -326,8 +409,10 @@ def save_config(config: Config, config_path: str) -> None:
             "quiet": config.output.quiet,
             "delete_temp_files": config.output.delete_temp_files,
             "compression_method": config.output.compression_method,
+            "lzma2_block_size": config.output.lzma2_block_size,
             "tiff_compression": config.output.tiff_compression,
         },
+        "interpolation": asdict(config.interpolation),
     }
 
     # Preserve _descriptions section if it exists in original file

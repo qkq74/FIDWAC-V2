@@ -1,5 +1,5 @@
 """
-FIDVAC v2 - DCT Length Predictors
+FIDWAC v2 - DCT Length Predictors
 ==================================
 
 Backends:
@@ -316,7 +316,7 @@ class AdvancedHeuristicPredictor:
         blocks_array = np.stack(blocks, axis=0)  # (batch, n, n)
         batch_size = blocks_array.shape[0]
 
-        from scipy.fftpack import dct as scipy_dct
+        from scipy.fft import dct as scipy_dct
 
         dct_batch = scipy_dct(scipy_dct(blocks_array, axis=1, norm="ortho"), axis=2, norm="ortho")
         dct_flat = np.round(dct_batch.reshape(batch_size, -1), 2)

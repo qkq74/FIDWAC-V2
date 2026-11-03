@@ -1,5 +1,5 @@
 """
-FIDVAC v2 GUI — compression / decompression runner
+FIDWAC v2 GUI — compression / decompression runner
 =====================================================
 Mixin class GUIRunner providing:
   _run(), _stop(), _run_thread(), _run_finished()
@@ -38,6 +38,7 @@ class GUIRunner:
         self._op_label = None
         self.input_path = None
         self.accuracy = None
+        self.method = None
         self.block_size = None
         self.backend = None
         self.uint8_mode = None
@@ -134,7 +135,7 @@ class GUIRunner:
         path = self.input_path.get()
 
         # Check if file exists and determine operation
-        if path.lower().endswith(".7z"):
+        if path.lower().endswith((".7z", ".fpred", ".sz3")):
             if os.path.exists(path):
                 self._op_label.config(text="✓ Decompression", foreground="#4ec94e")
             else:
@@ -254,14 +255,14 @@ class GUIRunner:
             path = filedialog.askopenfilename(
                 title="Select input file",
                 filetypes=[
-                    ("Supported rasters", "*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.asc *.img *.7z"),
+                    ("Supported rasters", "*.tif *.tiff *.png *.jpg *.jpeg *.bmp *.asc *.img *.7z *.fpred *.sz3"),
                     ("GeoTIFF", "*.tif *.tiff"),
                     ("PNG + world file", "*.png"),
                     ("JPEG + world file", "*.jpg *.jpeg"),
                     ("BMP + world file", "*.bmp"),
                     ("Erdas Imagine", "*.img"),
                     ("ASC Grid", "*.asc"),
-                    ("Archive", "*.7z"),
+                    ("Archive / Compressed", "*.7z *.fpred *.sz3"),
                     ("All files", "*.*"),
                 ],
             )
@@ -316,6 +317,10 @@ class GUIRunner:
 
         config = load_config(None)
 
+        from config import set_gpu_mode
+
+        config.performance.gpu = self.gpu.get()
+        set_gpu_mode(config.performance.gpu)  # the in-process batch path reads this mode
         config.compression.accuracy = self.accuracy.get()
         config.compression.auto_select_block_size = self.auto_select.get()
         config.compression.rgb_quality = self.rgb_quality.get()
@@ -343,6 +348,7 @@ class GUIRunner:
         config.compression.auto_select_std_threshold_high = float(self.std_high.get())
         config.compression.auto_select_std_threshold_medium = float(self.std_medium.get())
         config.output.quiet = self.quiet.get()
+        config.compression.method = self.method.get()
         config.directories.source = self.source_dir.get()
         config.directories.results = self.results_dir.get()
         config.model.advanced_heuristic = self.advanced_heuristic.get()
@@ -353,9 +359,10 @@ class GUIRunner:
         config.compression.ycbcr_cb_multiplier = self.ycbcr_cb_mult.get()
         config.compression.ycbcr_cr_multiplier = self.ycbcr_cr_mult.get()
         config.output.compression_method = self.compression_method.get()
+        config.output.lzma2_block_size = self.lzma2_block_size.get().strip()
         config.output.tiff_compression = self.tiff_compression.get()
         config.output.delete_temp_files = self.delete_temp.get()
-        config.compression.crs = "" if self.no_crs.get() else self.crs.get()
+        config.compression.crs = "none" if self.no_crs.get() else self.crs.get()
         config.compression.decimal_places = self.decimal_places.get()
 
         return config
@@ -417,6 +424,7 @@ class GUIRunner:
         self._stop_button.config(state="disabled")
 
     def _run(self):
+        self._commit_accuracy()  # pylint: disable=no-member
         if not self._validate():
             return
         self._stop_event.clear()
@@ -500,9 +508,16 @@ class GUIRunner:
         from compress.decompression import decompress_file
         from compress.compression import compress_image
 
-        if input_path.lower().endswith(".7z"):
+        if input_path.lower().endswith((".7z", ".fpred", ".sz3")):
             self._log(f"Decompressing: {input_path}")
             out = decompress_file(input_path, config, output_dir)
+        elif config.compression.method in ("pred", "sz3"):
+            self._log(f"Compressing with {config.compression.method}: {input_path}")
+            compress_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "compress.py")
+            _, out = self._process_file_subprocess(
+                input_path, output_dir, compress_py, config, num_processes
+            )
+            self._update_stats_file(input_path, out)  # pylint: disable=no-member
         else:
             self._log(f"Compressing: {input_path}")
             out = compress_image(input_path, config, num_processes, output_dir)
@@ -518,7 +533,7 @@ class GUIRunner:
         archive_files = []
         for root, _dirs, fnames in os.walk(input_dir):
             for fname in fnames:
-                if fname.lower().endswith(".7z"):
+                if fname.lower().endswith((".7z", ".fpred", ".sz3")):
                     archive_files.append(os.path.join(root, fname))
 
         files = sorted(set(raster_files + archive_files))
@@ -549,10 +564,19 @@ class GUIRunner:
                     f"{i-1}/{total_files} files {pct_before}%|" f"{'█'*int(pct_before/5)}|",
                 )
                 try:
-                    if path.lower().endswith(".7z"):
-                        out = decompress_file(path, config, _file_output_dir(path))
+                    file_out_dir = _file_output_dir(path)
+                    if path.lower().endswith((".7z", ".fpred", ".sz3")):
+                        out = decompress_file(path, config, file_out_dir)
+                    elif config.compression.method in ("pred", "sz3"):
+                        compress_py = os.path.join(
+                            os.path.dirname(os.path.abspath(__file__)), "..", "compress.py"
+                        )
+                        _, out = self._process_file_subprocess(
+                            path, file_out_dir, compress_py, config, num_processes
+                        )
+                        self._update_stats_file(path, out)  # pylint: disable=no-member
                     else:
-                        out = compress_image(path, config, num_processes, _file_output_dir(path))
+                        out = compress_image(path, config, num_processes, file_out_dir)
                         self._update_stats_file(path, out)  # pylint: disable=no-member
                     self._log(f"  → {os.path.relpath(out, output_dir)}")
                 except Exception as exc:
@@ -607,16 +631,32 @@ class GUIRunner:
                     self._log(f"  Error ({os.path.basename(futures[future])}): {exc}")
                     self._record_error()  # pylint: disable=no-member
 
+    @staticmethod
+    def _is_uint8_raster(path):
+        """True when the file is a raster and every band is uint8."""
+        try:
+            import rasterio  # pylint: disable=import-outside-toplevel
+
+            with rasterio.open(path) as src:
+                return all(dt == "uint8" for dt in src.dtypes)
+        except Exception:  # pylint: disable=broad-except
+            return False
+
     def _process_file_subprocess(self, input_path, output_dir, compress_py, config, num_processes):
         import subprocess as sp
         from compress.decompression import decompress_file
 
-        if input_path.lower().endswith(".7z"):
+        if input_path.lower().endswith((".7z", ".fpred", ".sz3")):
             out = decompress_file(input_path, config, output_dir)
             return input_path, out
 
         cmd = [sys.executable, compress_py, "-i", input_path, "-o", output_dir]
-        cmd += ["--accuracy", str(config.compression.accuracy)]
+        cmd += ["--method", config.compression.method]
+        accuracy = config.compression.accuracy
+        if config.compression.method in ("pred", "sz3") and self._is_uint8_raster(input_path):
+            # 8-bit input: the Accuracy field of the 8-bit section (pixel values), not the float slider
+            accuracy = config.compression.uint8_accuracy
+        cmd += ["--accuracy", str(accuracy)]
         if config.compression.auto_select_block_size:
             cmd += ["--auto"]
         else:
@@ -633,7 +673,7 @@ class GUIRunner:
         else:
             cmd += ["--no-accept-prediction"]
         cmd += ["--decimal-places", str(config.compression.decimal_places)]
-        cmd += ["--processes", str(num_processes), "--quiet"]
+        cmd += ["--processes", str(num_processes), "--gpu", self.gpu.get(), "--quiet"]
         if config.compression.uint8_accuracy_mode:
             cmd += [
                 "--uint8-accuracy-mode",
@@ -661,6 +701,8 @@ class GUIRunner:
             ]
         cmd += ["--crs", config.compression.crs]
         cmd += ["--compression-method", config.output.compression_method]
+        if config.output.lzma2_block_size:
+            cmd += ["--lzma2-block-size", config.output.lzma2_block_size]
         cmd += [
             (
                 "--verify-with-full-idct"
@@ -679,16 +721,26 @@ class GUIRunner:
 
         result = sp.run(cmd, capture_output=True, text=True, timeout=3600, check=False)
         if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or f"exit {result.returncode}")
+            # Handled CLI errors are printed on stdout ("Error ..."); tracebacks go to stderr.
+            errors = [ln.strip() for ln in result.stdout.splitlines() if ln.startswith("Error")]
+            tail = [ln.strip() for ln in result.stderr.splitlines() if ln.strip()]
+            raise RuntimeError(
+                errors[-1] if errors else (tail[-1] if tail else f"exit {result.returncode}")
+            )
 
-        # Find the compressed file and return its actual path
+        # Return the file the CLI wrote for this method (.7z, .fpred or .sz3), newest first.
         stem = os.path.splitext(os.path.basename(input_path))[0]
-        for f in os.listdir(output_dir):
-            if f.startswith(stem) and f.endswith(".7z"):
-                return input_path, os.path.join(output_dir, f)
-        # Fallback: if no .7z file found, return input path and output dir
-        # This shouldn't normally happen if compression succeeded
-        return input_path, output_dir
+        exts = {"pred": (".fpred", ".7z"), "sz3": (".sz3", ".7z")}.get(
+            config.compression.method, (".7z",)
+        )
+        found = [
+            os.path.join(output_dir, f)
+            for f in os.listdir(output_dir)
+            if f.startswith(stem) and f.endswith(exts)
+        ]
+        if not found:
+            raise RuntimeError(f"compression finished but no output found in {output_dir}")
+        return input_path, max(found, key=os.path.getmtime)
 
 
 __all__ = ["GUIRunner"]

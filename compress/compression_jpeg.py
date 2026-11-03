@@ -1,5 +1,5 @@
 """
-FIDVAC v2 - JPEG compression path (cm=1)
+FIDWAC v2 - JPEG compression path (cm=1)
 ==========================================
 Handles uint8 RGB (exactly 3 bands) via turbojpeg SIMD:
   - strips → JPEG bytes
@@ -24,6 +24,7 @@ from rasterio.windows import Window
 from tqdm import tqdm
 
 from config import Config
+from compress.output_crs import crs_label, resolve_output_crs
 from .compression_utils import pack_to_7z, write_msgpack, remove_if_exists
 
 def compress_jpeg_path(
@@ -44,9 +45,8 @@ def compress_jpeg_path(
 
     Returns path to the output .7z archive.
     """
-    from turbojpeg import TurboJPEG, TJPF_RGB, TJSAMP_420
-
-    TJFLAG_OPTIMIZE = 16
+    from turbojpeg import TJPF_RGB, TJSAMP_420
+    from compress.turbojpeg_loader import open_turbojpeg
 
     quality = config.compression.rgb_quality
     pad_W = (8 - W % 8) % 8
@@ -60,7 +60,7 @@ def compress_jpeg_path(
         print("  RGB channels: JPEG strips via turbojpeg")
         print(f"  quality={quality}, strip={strip_rows} rows, total={total_strips}")
 
-    tj = TurboJPEG()
+    tj = open_turbojpeg()
     jpeg_strips, strip_sizes, strip_offsets, nodata_masks = _encode_strips(
         src,
         H,
@@ -74,14 +74,14 @@ def compress_jpeg_path(
         tj,
         TJPF_RGB,
         TJSAMP_420,
-        TJFLAG_OPTIMIZE,
         config.output.quiet,
     )
 
     nodata_rle = _build_nodata_rle(has_nodata, nodata_masks, strip_offsets, H, W)
     del nodata_masks
 
-    output_path = _build_jpeg_output_path(file_path, config, output_dir, quality)
+    out_crs = resolve_output_crs(file_crs, config.compression.crs)
+    output_path = _build_jpeg_output_path(file_path, config, output_dir, quality, out_crs)
 
     _write_jpeg_archive(
         jpeg_strips,
@@ -93,7 +93,7 @@ def compress_jpeg_path(
         padded_W,
         nodata_value,
         has_nodata,
-        file_crs,
+        out_crs,
         transform,
         config,
         output_dir,
@@ -126,7 +126,6 @@ def _encode_strips(
     tj,
     TJPF_RGB,
     TJSAMP_420,
-    TJFLAG_OPTIMIZE,
     quiet,
 ):
     jpeg_strips = []
@@ -162,7 +161,6 @@ def _encode_strips(
             quality=quality,
             pixel_format=TJPF_RGB,
             jpeg_subsample=TJSAMP_420,
-            flags=TJFLAG_OPTIMIZE,
         )
         jpeg_strips.append(jpg)
         strip_sizes.append(len(jpg))
@@ -192,9 +190,9 @@ def _build_nodata_rle(has_nodata, nodata_masks, strip_offsets, H, W):
     return encode_mask_rle(full_mask) if full_mask.any() else None
 
 
-def _build_jpeg_output_path(file_path, config, output_dir, quality):
+def _build_jpeg_output_path(file_path, config, output_dir, quality, out_crs):
     base_name = os.path.splitext(os.path.basename(file_path))[0]
-    crs_clean = config.compression.crs.replace(":", "")
+    crs_clean = crs_label(out_crs)
     mode_suffix = "AUTO" if config.compression.auto_select_block_size else "N"
     output_name = f"{base_name}_{mode_suffix}8_Q{quality}_CRS{crs_clean}"
     return os.path.join(output_dir, f"{output_name}.7z")
@@ -210,7 +208,7 @@ def _write_jpeg_archive(
     padded_W,
     nodata_value,
     src_has_nodata,
-    file_crs,
+    out_crs,
     transform,
     config,
     output_dir,
@@ -232,7 +230,7 @@ def _write_jpeg_archive(
         "quality": config.compression.rgb_quality,
         "original_shape": [H, W],
         "padded_shape": [H, padded_W],
-        "crs": str(file_crs) if file_crs else config.compression.crs,
+        "crs": None if out_crs is None else out_crs.to_string(),
         "transform": list(transform)[:6],
         "nodata": nodata_value if src_has_nodata else None,
         "has_nodata": src_has_nodata,

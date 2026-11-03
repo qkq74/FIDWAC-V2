@@ -1,9 +1,9 @@
 """
-FIDVAC v2 - Core DCT/IDCT/Zigzag functions (cached, vectorized)
+FIDWAC v2 - Core DCT/IDCT/Zigzag functions (cached, vectorized)
 """
 
 import numpy as np
-from scipy.fftpack import dct, idct
+from scipy.fft import dct, idct
 from typing import Dict, Tuple
 
 _ZIGZAG_IDX_CACHE: Dict[int, np.ndarray] = {}

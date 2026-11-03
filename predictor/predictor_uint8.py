@@ -412,7 +412,7 @@ class Uint8Predictor:
 
         # Batch DCT
         from core.dct import _get_zigzag_indices
-        from scipy.fftpack import dct as scipy_dct
+        from scipy.fft import dct as scipy_dct
 
         dct_batch = scipy_dct(scipy_dct(blocks_arr, axis=1, norm="ortho"), axis=2, norm="ortho")
         dct_batch = np.round(dct_batch, 2)
@@ -457,14 +457,10 @@ class Uint8Predictor:
             default_L = (self.block_size * self.block_size) // 2
             return np.full(batch_size, default_L, dtype=np.int32), [[] for _ in range(batch_size)]
 
-        # Extract features from zigzag
-        ac_abs_means = np.empty(batch_size, dtype=np.float32)
-        zero_ratios = np.empty(batch_size, dtype=np.float32)
-
-        for k in range(batch_size):
-            ac = dct_zigzags[k][1:]  # skip DC
-            ac_abs_means[k] = float(np.mean(np.abs(ac)))
-            zero_ratios[k] = float(np.sum(ac == 0)) / max(1, len(ac))
+        # features from the zigzag coefficients, vectorised over the batch
+        ac = np.asarray(dct_zigzags)[:, 1:]  # skip DC
+        ac_abs_means = np.mean(np.abs(ac), axis=1).astype(np.float32)
+        zero_ratios = (np.sum(ac == 0, axis=1) / max(1, ac.shape[1])).astype(np.float32)
 
         # Use channel-specific grids when available (accuracy-specific combined file)
         if self.has_channel_grids:

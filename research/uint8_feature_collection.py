@@ -3,19 +3,19 @@
 Uint8 Per-Block Feature Collection
 ===================================
 
-Zbiera cechy DCT per blok dla danych uint8, podobnie jak w metodzie heurystycznej dla float16.
+Collects per-block DCT features for uint8 data, analogous to the heuristic method for float16.
 
 Workflow:
-  1. Zbierz cechy:    python3 uint8_feature_collection.py collect
+  1. Collect features:    python3 uint8_feature_collection.py collect
      → models/uint8_features_N{8,16}_raw.npy  (shape N_blocks × 21)
 
-Opis kolumn w uint8_features_N*_raw.npy:
-  0-15 : 16 cech statystycznych (patrz FEATURE_NAMES)
-    16   : min_L dla accuracy=2 px
-    17   : min_L dla accuracy=5 px
-    18   : min_L dla accuracy=10 px
-    19   : min_L dla accuracy=15 px
-    20   : min_L dla accuracy=20 px
+Column layout of uint8_features_N*_raw.npy:
+  0-15 : 16 statistical features (see FEATURE_NAMES)
+    16   : min_L for accuracy=2 px
+    17   : min_L for accuracy=5 px
+    18   : min_L for accuracy=10 px
+    19   : min_L for accuracy=15 px
+    20   : min_L for accuracy=20 px
 """
 
 # Force single-threaded BLAS/OpenMP before any imports to avoid thread thrashing
@@ -46,12 +46,12 @@ from core.dct import dct2, idct2, to_zigzag, from_zigzag
 # Konfiguracja
 # =============================================================================
 
-# Accuracy levels dla uint8 (maks. blad w pikselach, zgodnie z uint8_accuracy_sweep.py)
+# Accuracy levels for uint8 data (maximum error in pixels, matching uint8_accuracy_sweep.py)
 _TRAIN_ACCURACIES = [2, 5, 10, 15, 20]
 
-# Nazwy 21 kolumn — 16 cech + 5 wartości min_L (jedna per accuracy)
+# Names of the 21 columns: 16 features and 5 min_L values, one per accuracy level
 FEATURE_NAMES = [
-    # kol 0-15: cechy statystyczne
+    # Columns 0-15: statistical features
     "std_dev",
     "mean_val",
     "dc_value",
@@ -68,7 +68,7 @@ FEATURE_NAMES = [
     "zero_run_count",
     "zero_run_mean",
     "zero_run_max",
-    # kol 16-20: min_L dla accuracy 2 px, 5 px, 10 px, 15 px, 20 px
+    # Columns 16-20: min_L for accuracy 2 px, 5 px, 10 px, 15 px and 20 px
     "L_acc2",
     "L_acc5",
     "L_acc10",
@@ -78,7 +78,7 @@ FEATURE_NAMES = [
 
 
 # =============================================================================
-# Funkcje pomocnicze
+# Helper functions
 # =============================================================================
 
 
@@ -105,13 +105,13 @@ def _extract_blocks(
 
 
 # =============================================================================
-# Główna funkcja zbierająca cechy per blok
+# Main function that collects the features of each block
 # =============================================================================
 
 
 def _collect_features_worker(args: Tuple[str, int, int, int, float, float]) -> np.ndarray:
     """
-    Worker: zbiera 16 cech + min_L dla 5 accuracy dla WSZYSTKICH bloków.
+    Worker: collects 16 features and min_L for 5 accuracy levels, for all blocks.
 
     Parameters
     ----------
@@ -122,8 +122,8 @@ def _collect_features_worker(args: Tuple[str, int, int, int, float, float]) -> n
     -------
     np.ndarray
         Array shape (N_blocks, 21):
-          kol 0-15  : 16 cech wg FEATURE_NAMES
-          kol 16-20 : min_L dla accuracy [2, 5, 10, 15, 20]
+          columns 0-15: 16 features in FEATURE_NAMES order
+          columns 16-20: min_L for accuracy [2, 5, 10, 15, 20]
     """
     image_path, block_size, channel_idx, scaling_factor, accuracy_px, nodata_value = args
 
@@ -154,13 +154,13 @@ def _collect_features_worker(args: Tuple[str, int, int, int, float, float]) -> n
             if np.all(block == 0):
                 continue
 
-            # --- 16 cech statystycznych ---
+            # --- 16 statistical features ---
             # 0  std_dev
             std_dev = float(np.std(block))
             # 1  mean_val
             mean_val = float(np.mean(block))
 
-            # DCT (wymagane dla cech AC)
+            # DCT, required for the AC features
             dct_block = dct2(block, dct_type=2)
             # Apply scaling factor
             dct_block_scaled = dct_block / scaling_factor
@@ -202,7 +202,7 @@ def _collect_features_worker(args: Tuple[str, int, int, int, float, float]) -> n
             entropy = float(-np.sum(hist_nz * np.log2(hist_nz))) if len(hist_nz) > 0 else 0.0
 
             # 13 zero_run_count, 14 zero_run_mean, 15 zero_run_max
-            # (zliczamy ciągłe serie zer w AC)
+            # Count the runs of consecutive zeros in the AC coefficients
             in_run = False
             run_len = 0
             runs = []
@@ -221,7 +221,7 @@ def _collect_features_worker(args: Tuple[str, int, int, int, float, float]) -> n
             zero_run_mean = float(np.mean(runs)) if runs else 0.0
             zero_run_max = float(max(runs)) if runs else 0.0
 
-            # --- Binary search min_L dla każdej accuracy (reużywa dct_zigzag) ---
+            # --- Binary search for min_L at each accuracy level (reuses dct_zigzag) ---
             n = block_size
             block_f64 = block.astype(np.float64)
             L_vals = []
@@ -263,7 +263,7 @@ def _collect_features_worker(args: Tuple[str, int, int, int, float, float]) -> n
                     zero_run_count,
                     zero_run_mean,
                     zero_run_max,
-                    # kol 16-20: min_L per accuracy
+                    # Columns 16-20: min_L per accuracy
                     L_vals[0],
                     L_vals[1],
                     L_vals[2],
@@ -294,24 +294,24 @@ def collect_features_from_dataset(
     num_workers: Optional[int] = None,
 ) -> None:
     """
-    Zbierz 16 cech + min_L (dla 5 accuracy) dla WSZYSTKICH bloków z datasetu.
+    Collects 16 features and min_L (for 5 accuracy levels) for all blocks in the dataset.
 
     Parameters
     ----------
     dataset_path : str
-        Ścieżka do katalogu z plikami .tif
+        Path to the folder with .tif files
     output_dir : str
-        Katalog wyjściowy dla plików .npy
+        Output folder for .npy files
     num_files : int
-        Maksymalna liczba plików do przetworzenia
+        Maximum number of files to process
     block_sizes : List[int]
-        Lista rozmiarów bloków do przetestowania
+        Block sizes to test
     scaling_factors : List[int]
-        Lista scaling factors do przetestowania
+        Scaling factors to test
     channel_mode : str
-        "first", "rgb", lub "all" - który kanał użyć
+        "first", "rgb", or "all": channels to use
     num_workers : Optional[int]
-        Liczba workerów (domyślnie: wszystkie dostępne rdzenie)
+        Number of workers (default: all available cores)
     """
     if num_workers is None:
         num_workers = os.cpu_count()
@@ -320,11 +320,11 @@ def collect_features_from_dataset(
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    # Zbierz pliki
+    # Collect input files
     tif_files = sorted(dataset_dir.glob("**/*.tif"))[:num_files]
-    print(f"\nZnaleziono {len(tif_files)} plików .tif")
+    print(f"\nFound {len(tif_files)} .tif files")
 
-    # Przygotuj zadania
+    # Prepare tasks
     tasks = []
     for tif_file in tif_files:
         try:
@@ -347,7 +347,7 @@ def collect_features_from_dataset(
                                     block_size,
                                     channel_idx,
                                     scaling_factor,
-                                    0.0,  # accuracy_percent placeholder
+                                    0.0,  # accuracy_px: unused by the worker, which evaluates the fixed levels 2, 5, 10, 15 and 20 px
                                     nodata_value,
                                 )
                             )
@@ -355,9 +355,9 @@ def collect_features_from_dataset(
             print(f"  Warning: Cannot read {tif_file}: {e}")
             continue
 
-    print(f"Przygotowano {len(tasks)} zadań")
+    print(f"Prepared {len(tasks)} tasks")
 
-    # Grupuj zadania po (block_size, scaling_factor)
+    # Group tasks by (block_size, scaling_factor)
     from collections import defaultdict
 
     task_groups = defaultdict(list)
@@ -365,11 +365,11 @@ def collect_features_from_dataset(
         key = (task[1], task[3])  # (block_size, scaling_factor)
         task_groups[key].append(task)
 
-    # Przetwarzaj każdą grupę
+    # Process each group
     for (block_size, scaling_factor), group_tasks in task_groups.items():
         print(f"\n{'='*60}")
-        print(f"Przetwarzanie: block_size={block_size}, scaling_factor={scaling_factor}")
-        print(f"  Zadań: {len(group_tasks)}")
+        print(f"Processing: block_size={block_size}, scaling_factor={scaling_factor}")
+        print(f"  Tasks: {len(group_tasks)}")
 
         start = time.time()
         chunks = []
@@ -392,11 +392,11 @@ def collect_features_from_dataset(
                     elapsed = time.time() - start
                     rate = completed / elapsed if elapsed > 0 else 0
                     print(
-                        f"  {completed}/{len(group_tasks)} zadań | "
-                        f"{blocks_total:,} bloków | {rate:.1f} tasks/s"
+                        f"  {completed}/{len(group_tasks)} tasks | "
+                        f"{blocks_total:,} blocks | {rate:.1f} tasks/s"
                     )
 
-        # Zapisz wyniki
+        # Save the results
         if chunks:
             all_data = np.concatenate(chunks, axis=0)
             out_file = output_path / f"uint8_features_N{block_size}_sf{scaling_factor}_raw.npy"
@@ -408,9 +408,9 @@ def collect_features_from_dataset(
 
             print(f"\nZapisano: {out_file}")
             print(f"  Shape: {all_data.shape}")
-            print(f"  Rozmiar: {all_data.nbytes / 1024 / 1024:.1f} MB")
+            print(f"  Size: {all_data.nbytes / 1024 / 1024:.1f} MB")
 
-            # Statystyki per kolumna
+            # Statistics per column
             for col_i, name in enumerate(FEATURE_NAMES):
                 col = all_data[:, col_i]
                 pct = np.percentile(col, [10, 50, 90, 99])
@@ -422,7 +422,7 @@ def collect_features_from_dataset(
                 )
         else:
             print(
-                f"  Brak danych do zapisu dla block_size={block_size}, scaling_factor={scaling_factor}"
+                f"  No data to save for block_size={block_size}, scaling_factor={scaling_factor}"
             )
 
         elapsed = time.time() - start
@@ -442,37 +442,37 @@ def collect_features_during_sweep(
     max_blocks_per_channel: Optional[int] = None,
 ) -> np.ndarray:
     """
-    Zbierz cechy per blok dla pojedynczego kanału podczas sweep.
+    Collects per-block features for a single channel during a sweep.
 
     Parameters
     ----------
     data : np.ndarray
-        Dane kanału (2D array)
+        Channel data (2D array)
     block_size : int
-        Rozmiar bloku
+        Block size
     scaling_factor : int
         Scaling factor
     accuracy_px : float
-        Cel dokładności jako maksymalny blad w pikselach
+        Accuracy target as the maximum error in pixels
 
     Returns
     -------
     np.ndarray
         Array shape (N_blocks, 17):
-          kol 0-15 : 16 cech
-          kol 16   : min_L dla podanej accuracy
+          columns 0-15: 16 features
+          column 16: min_L for the given accuracy
     """
     # Pad and extract blocks
     padded_image, _ = _pad_image(data, block_size)
     blocks = _extract_blocks(padded_image, block_size)
 
-    # Opcjonalnie ogranicz liczbę bloków na kanał (próbkowanie)
+    # Optionally limit the number of blocks per channel (sampling)
     if (
         max_blocks_per_channel is not None
         and max_blocks_per_channel > 0
         and len(blocks) > max_blocks_per_channel
     ):
-        # Rozłóż próbki równomiernie po całym obrazie (deterministycznie)
+        # Spread the samples evenly over the whole image (deterministic)
         indices = np.linspace(0, len(blocks) - 1, max_blocks_per_channel, dtype=int)
         selected_blocks = [blocks[i] for i in indices]
     else:
@@ -487,7 +487,7 @@ def collect_features_during_sweep(
         if np.all(block == 0):
             continue
 
-        # --- 16 cech statystycznych ---
+        # --- 16 statistical features ---
         std_dev = float(np.std(block))
         mean_val = float(np.mean(block))
 
@@ -540,7 +540,7 @@ def collect_features_during_sweep(
         zero_run_mean = float(np.mean(runs)) if runs else 0.0
         zero_run_max = float(max(runs)) if runs else 0.0
 
-        # --- Binary search min_L dla podanej accuracy ---
+        # --- Binary search for min_L at the given accuracy ---
         n = block_size
         block_f64 = block.astype(np.float64)
         lo, hi = 1, len(dct_zigzag)

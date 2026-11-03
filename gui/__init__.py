@@ -1,3 +1,3 @@
 """
-FIDVAC v2 GUI sub-package
+FIDWAC v2 GUI sub-package
 """

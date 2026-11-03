@@ -1,5 +1,5 @@
 """
-FIDVAC v2 GUI — reusable widgets
+FIDWAC v2 GUI — reusable widgets
 ==================================
   _CanvasProgressBar  — flat canvas progress bar
   _StreamToQueue      — stdout/stderr redirect to GUI queue
@@ -281,8 +281,15 @@ TOOLTIPS = {
     "run_button": "Start compression/decompression with current settings.",
     "stop_button": "Stop running compression process.",
     "clear_log": "Clear log output.",
-    "accuracy": "Maximum reconstruction error per pixel\n"
-    "0.01 = high quality | 0.5 = high compression",
+    "accuracy": "Maximum reconstruction error per pixel (float data).\n"
+    "0.01 = high quality | 0.5 = high compression\n"
+    "8-bit input takes its accuracy from the 8-bit section.",
+    "method": "Compression path:\n"
+    "dct = classic DCT workflow (default)\n"
+    "pred = near-lossless predictive cm=7 path\n"
+    "sz3 = external SZ3 absolute-error path (cm=8)\n"
+    "pred and sz3 code every band separately (RGB and multi-band too).\n"
+    "Keep dct/pred/sz3 as distinct modes; choose based on error target and file size.",
     "block_size": "DCT block size in pixels.\n"
     "Larger blocks → better compression for smooth terrain.\n"
     "Smaller blocks → better for complex/varied data.",
@@ -291,11 +298,15 @@ TOOLTIPS = {
     "backend": "heuristic – rule-based prediction with lookup tables\n"
     "binary    – binary search only (no prediction)",
     "processes": "Number of parallel worker processes.\n" "More = faster on multi-core CPUs.",
+    "gpu": "auto: use the GPU when it is found, otherwise the CPU (with a note).\n"
+           "on: require the GPU. off: CPU only. The number of processes that get a GPU context\n"
+           "is measured on this machine.",
     "files_parallel": "Number of files to process simultaneously.\n"
     "1 = single file gets all processes (max compression speed)\n"
     ">1 = multiple files share processes (better I/O, more parallelism)",
-    "crs": "Coordinate Reference System written to output GeoTIFF.\n"
-    "Example: epsg:2180  (PUWG 1992, Poland)",
+    "crs": "CRS of the output GeoTIFF.\n"
+    "Empty = CRS of the input file (none if the input has no CRS).\n"
+    "An EPSG code (e.g. epsg:2180) replaces the input CRS.",
     "decimal_places": "DCT coefficient rounding precision.\n" "2 → round to 0.01 step.",
     "auto_sample_size": "How many blocks to compress during auto-select test.\n"
     "Higher = more accurate estimate, but slower start.",
@@ -324,10 +335,13 @@ TOOLTIPS = {
     "PPMD   – best ratio, single-threaded\n"
     "BZIP2  – medium speed/ratio\n"
     "DEFLATE – fastest, least compression",
-    "no_crs": "Check when input data has no geographic coordinate system\n"
-    "(e.g. Mars DEM, synthetic grids, non-Earth rasters).\n"
-    "The output GeoTIFF will be written without a CRS.",
-    "crs_epsg": "EPSG code for the output GeoTIFF coordinate system.\n"
+    "lzma2_block_size": "LZMA2 block (chunk) size of the .7z archive, e.g. 1m, 2m, 4m.\n"
+    "7-Zip compresses the blocks in parallel, so smaller blocks\n"
+    "are much faster with nearly the same size.\n"
+    "Empty = 7-Zip default. Only used with LZMA2.",
+    "no_crs": "Write the output GeoTIFF without a CRS, even if the input has one\n"
+    "(e.g. Mars DEM, synthetic grids, non-Earth rasters).",
+    "crs_epsg": "CRS of the output GeoTIFF. Empty = CRS of the input file.\n"
     "Example: epsg:2180 (Poland PUWG 1992)\n"
     "         epsg:4326 (WGS84 geographic)\n"
     "         epsg:3857 (Web Mercator)",
@@ -336,11 +350,10 @@ TOOLTIPS = {
     "quiet": "Suppress all progress messages in the log panel.",
     "show_log_panel": "Show or hide the log panel at the bottom of the window.\n"
     "Hide to save space, show to monitor compression progress.",
-    "rgb_quality": "Quality % for 8-bit/grayscale and RGB data (like JPEG).\n"
+    "rgb_quality": "JPEG quality % for 8-bit data in Quality mode (dct; RGB uses JPEG).\n"
     "85% = good quality (default), 100% = visually lossless,\n"
     "50% = medium compression, 25% = high compression.\n"
-    "Only applies to 8-bit data (uint8, range 0-255).\n"
-    "For DSM/DTM (float32), the Accuracy parameter is used instead.",
+    "Accuracy is set in the Accuracy field of the 8-bit section, not with this slider.",
     "lossless": "Use lossless PNG compression for uint8 data.\n"
     "When enabled, 8-bit data is compressed with PNG-style filtering + deflate.\n"
     "No quality loss, but compression ratio is lower (2-4x vs 4-10x).\n"
@@ -352,10 +365,10 @@ TOOLTIPS = {
     "Guarantees max color value error <= Accuracy threshold.\n"
     "Data is centered (-128) before DCT for optimal compression.\n"
     "Slower than quality mode, but error-controlled.",
-    "uint8_accuracy_px": "Maximum allowed color value error for 8-bit data in Accuracy mode.\n"
+    "uint8_accuracy_px": "Maximum allowed color value error for 8-bit data, in pixel values (0-255).\n"
     "Integer value: 2 = minimum (due to YCbCr rounding), higher = more error allowed.\n"
-    "Lower = better quality and larger file.\n"
-    "Only active when 8-bit mode = Accuracy.",
+    "Used by dct Accuracy mode and by pred / sz3 on 8-bit input.\n"
+    "Lower = better quality and larger file.",
     "uint8_lossless": "Lossless PNG-style compression for 8-bit data.\n"
     "PNG Sub filter + zlib deflate.\n"
     "No quality loss, but lower compression ratio (2-4x).",

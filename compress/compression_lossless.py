@@ -1,5 +1,5 @@
 """
-FIDVAC v2 - Lossless compression path (cm=4)
+FIDWAC v2 - Lossless compression path (cm=4)
 =============================================
 Compresses uint8 bands using zlib deflate with optional Sub filter.
 max error = 0 (exact reconstruction).

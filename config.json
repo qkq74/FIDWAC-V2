@@ -6,6 +6,7 @@
     "cache": "../cache_train_v2/"
   },
   "compression": {
+    "method": "dct",
     "accuracy": 0.05,
     "block_size": 8,
     "decimal_places": 2,
@@ -23,6 +24,7 @@
       1,
       10
     ],
+    "uint8_zero_mask": false,
     "ycbcr_fallback_multipliers": [
       1.0,
       0.9,
@@ -40,13 +42,13 @@
       8,
       16,
       32
-    ],
-    "rgb_strip_height_px": 2048
+    ]
   },
   "performance": {
     "parallel": {
       "num_processes": "auto"
     },
+    "gpu": "auto",
     "optimizations": {
       "fast_eval_basis": true,
       "verify_with_full_idct": true,
@@ -59,9 +61,12 @@
     "advanced_heuristic": false,
     "minimize_backscan": 10,
     "backscan_break_after": 3,
-    "accept_prediction_if_within_accuracy": true,
-    "uint8_use_L_prediction": true,
+    "accept_prediction_if_within_accuracy": false,
+    "uint8_use_L_prediction": false,
     "uint8_L_prediction_scales": [
+      0.2,
+      0.3,
+      0.5,
       0.7,
       1.0,
       1.1,
@@ -73,6 +78,32 @@
     "quiet": false,
     "delete_temp_files": true,
     "compression_method": "LZMA2",
+    "lzma2_block_size": "2m",
     "tiff_compression": "DEFLATE"
+  },
+  "interpolation": {
+    "z_field_name": "z",
+    "filter_las": false,
+    "filter_classes": [
+      2
+    ],
+    "neighbours": 10,
+    "resolution": 0.5,
+    "max_distance": 5.0,
+    "weights": 2.0,
+    "leafsize": 10,
+    "r_min_function": false,
+    "r_min": 0.5,
+    "smooth_result": true,
+    "smooth_level": 1.0,
+    "geoid_correction": false,
+    "geoid_correction_file": "interpolation/geoid/PL_geod.7z",
+    "source_crs": "epsg:2180",
+    "geoid_crs": "epsg:4326",
+    "geoid_max_distance": 2000.0,
+    "csv_result": true,
+    "surfer_grd": false,
+    "save_points_shp": false,
+    "preview_png": false
   }
 }

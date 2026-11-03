@@ -7,8 +7,6 @@ set +e  # Do not exit on error (we handle errors manually)
 # Initialize variables
 FAILED_DEPS=()
 PKG_MANAGER=""
-LIBJPEG_INSTALL_PATH=""
-LIBJPEG_FOUND=0
 
 echo "========================================"
 echo "FIDWAC v2 Linux Installer"
@@ -87,6 +85,52 @@ source "$VENV_DIR/bin/activate"
 echo "Upgrading pip..."
 pip install --upgrade pip -q
 
+# Detect or install CUDA toolkit and GPU runtime for Numba/CUDA.
+detect_cuda_root() {
+    local cand
+    local seen=()
+    for cand in \
+        "${CUDA_HOME:-}" \
+        "${NV:-}" \
+        "$HOME"/.fidwac/venv/lib/python*/site-packages/nvidia/cu* \
+        "/usr/local/cuda" \
+        "/usr/local/cuda-13" \
+        "/usr/local/cuda-12" \
+        "/usr/local/cuda-11" \
+        "/usr/local/cuda-12.8" \
+        "/usr/local/cuda-13.1" \
+        "/opt/cuda"; do
+        if [ -n "$cand" ] && [ -x "$cand/bin/nvcc" ]; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    if command -v nvcc >/dev/null 2>&1; then
+        echo "$(dirname "$(dirname "$(command -v nvcc)")")"
+        return 0
+    fi
+    return 1
+}
+
+ensure_cuda_runtime() {
+    if detect_cuda_root >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "[INFO] CUDA toolkit not detected; attempting to install the NVIDIA CUDA runtime packages into the venv."
+    pip install --quiet --upgrade \
+        nvidia-cuda-runtime-cu12 \
+        nvidia-cuda-nvcc-cu12 \
+        nvidia-cuda-cupti-cu12 2>/dev/null || true
+
+    if detect_cuda_root >/dev/null 2>&1; then
+        echo "[OK] CUDA toolkit discovered after installation."
+        return 0
+    fi
+
+    return 1
+}
+
 echo ""
 
 # Install system dependencies
@@ -101,9 +145,11 @@ if command -v apt-get &> /dev/null; then
     PKG_MANAGER="apt"
     DISTRO="Debian/Ubuntu"
     GDAL_PKG="libgdal-dev"
-    JPEG_PKG="libjpeg62-turbo-dev"
+    NASM_PKG="nasm"
     LLVM_PKG="llvm-dev"
-    P7ZIP_PKG="p7zip-full"
+
+    LLVM_PKG="llvm-dev"
+ZENITY_PKG="zenity"
     CMAKE_PKG="cmake"
     BUILD_PKG="build-essential"
     PKG_CHECK_CMD="dpkg -l | grep -q"
@@ -111,9 +157,11 @@ elif command -v dnf &> /dev/null; then
     PKG_MANAGER="dnf"
     DISTRO="Fedora/RHEL 8+"
     GDAL_PKG="gdal-devel"
-    JPEG_PKG="libjpeg-turbo-devel"
+    NASM_PKG="nasm"
     LLVM_PKG="llvm-devel"
-    P7ZIP_PKG="p7zip"
+
+    LLVM_PKG="llvm-devel"
+ZENITY_PKG="zenity"
     CMAKE_PKG="cmake"
     BUILD_PKG="gcc-c++ make"
     PKG_CHECK_CMD="rpm -q"
@@ -121,9 +169,11 @@ elif command -v yum &> /dev/null; then
     PKG_MANAGER="yum"
     DISTRO="RHEL 7/CentOS"
     GDAL_PKG="gdal-devel"
-    JPEG_PKG="libjpeg-turbo-devel"
+    NASM_PKG="nasm"
     LLVM_PKG="llvm-devel"
-    P7ZIP_PKG="p7zip"
+
+    LLVM_PKG="llvm-devel"
+ZENITY_PKG="zenity"
     CMAKE_PKG="cmake"
     BUILD_PKG="gcc-c++ make"
     PKG_CHECK_CMD="rpm -q"
@@ -131,15 +181,17 @@ elif command -v pacman &> /dev/null; then
     PKG_MANAGER="pacman"
     DISTRO="Arch Linux"
     GDAL_PKG="gdal"
-    JPEG_PKG="libjpeg-turbo"
+    NASM_PKG="nasm"
     LLVM_PKG="llvm"
-    P7ZIP_PKG="p7zip"
+
+    LLVM_PKG="llvm"
+ZENITY_PKG="zenity"
     CMAKE_PKG="cmake"
     BUILD_PKG="base-devel"
     PKG_CHECK_CMD="pacman -Q"
 else
     echo "[WARNING] Package manager not detected. Skipping system dependencies."
-    echo "Please install manually: GDAL, libjpeg-turbo, LLVM, p7zip"
+    echo "Please install manually: GDAL, LLVM, cmake, nasm, zenity (7zz: see install/README.md)"
     echo ""
 fi
 
@@ -153,14 +205,17 @@ if [ -n "$PKG_MANAGER" ]; then
     if ! eval "$PKG_CHECK_CMD '$GDAL_PKG' > /dev/null 2>&1"; then
         MISSING_DEPS+=("$GDAL_PKG")
     fi
-    if ! eval "$PKG_CHECK_CMD '$JPEG_PKG' > /dev/null 2>&1"; then
-        MISSING_DEPS+=("$JPEG_PKG")
+    if ! eval "$PKG_CHECK_CMD '$CMAKE_PKG' > /dev/null 2>&1"; then
+        MISSING_DEPS+=("$CMAKE_PKG")
+    fi
+    if ! eval "$PKG_CHECK_CMD '$NASM_PKG' > /dev/null 2>&1"; then
+        MISSING_DEPS+=("$NASM_PKG")
     fi
     if ! eval "$PKG_CHECK_CMD '$LLVM_PKG' > /dev/null 2>&1"; then
         MISSING_DEPS+=("$LLVM_PKG")
     fi
-    if ! eval "$PKG_CHECK_CMD '$P7ZIP_PKG' > /dev/null 2>&1"; then
-        MISSING_DEPS+=("$P7ZIP_PKG")
+    if ! eval "$PKG_CHECK_CMD '$ZENITY_PKG' > /dev/null 2>&1"; then
+        MISSING_DEPS+=("$ZENITY_PKG")
     fi
     
     if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
@@ -168,21 +223,26 @@ if [ -n "$PKG_MANAGER" ]; then
         echo "Attempting to install..."
         echo ""
         
-        case "$PKG_MANAGER" in
-            apt)
-                sudo apt update -qq
-                sudo apt install -y ${MISSING_DEPS[*]} 2>&1 | grep -E "^(Unable|E:|Package|Setting)" || true
-                ;;
-            dnf)
-                sudo dnf install -y ${MISSING_DEPS[*]} 2>&1 | grep -E "^(Error|No package)" || true
-                ;;
-            yum)
-                sudo yum install -y ${MISSING_DEPS[*]} 2>&1 | grep -E "^(Error|No package)" || true
-                ;;
-            pacman)
-                sudo pacman -S --noconfirm ${MISSING_DEPS[*]} 2>&1 | grep -E "^(error|warning)" || true
-                ;;
-        esac
+        echo "Installing them needs sudo: enter your password when asked."
+        if sudo -v 2>/dev/null; then
+            case "$PKG_MANAGER" in
+                apt)
+                    sudo apt update -qq
+                    sudo apt install -y ${MISSING_DEPS[*]} 2>&1 | grep -E "^(Unable|E:|Package|Setting)" || true
+                    ;;
+                dnf)
+                    sudo dnf install -y ${MISSING_DEPS[*]} 2>&1 | grep -E "^(Error|No package)" || true
+                    ;;
+                yum)
+                    sudo yum install -y ${MISSING_DEPS[*]} 2>&1 | grep -E "^(Error|No package)" || true
+                    ;;
+                pacman)
+                    sudo pacman -S --noconfirm ${MISSING_DEPS[*]} 2>&1 | grep -E "^(error|warning)" || true
+                    ;;
+            esac
+        else
+            echo "[WARNING] sudo is not available here (no password entered), system packages were not installed."
+        fi
         
         # Check which packages failed to install
         for pkg in "${MISSING_DEPS[@]}"; do
@@ -203,165 +263,6 @@ if [ -n "$PKG_MANAGER" ]; then
     echo ""
 fi
 
-# =========================================================================
-# libjpeg-turbo 3.0+ COMPILATION (if needed)
-# =========================================================================
-echo "Checking libjpeg-turbo version..."
-
-TURBOJPEG_VERSION=$(python3 2>/dev/null << 'PYTHON_VERSION_CHECK'
-import sys
-try:
-    from turbojpeg import TurboJPEG
-    # Try to instantiate to check compatibility
-    tj = TurboJPEG()
-    print("3.0+")
-    sys.exit(0)
-except Exception:
-    print("NOT_FOUND")
-    sys.exit(1)
-PYTHON_VERSION_CHECK
-)
-
-if [ "$TURBOJPEG_VERSION" != "3.0+" ]; then
-    echo "[WARNING] libjpeg-turbo 3.0+ not found or incompatible"
-    echo ""
-    echo "Attempting to download and compile libjpeg-turbo 3.0+ from GitHub..."
-    echo ""
-    
-    # First, ensure cmake and build tools are installed
-    echo "Ensuring build tools are available..."
-    MISSING_BUILD_TOOLS=()
-    
-    if ! command -v cmake &> /dev/null; then
-        MISSING_BUILD_TOOLS+=("$CMAKE_PKG")
-    fi
-    if ! command -v make &> /dev/null; then
-        MISSING_BUILD_TOOLS+=("$BUILD_PKG")
-    fi
-    
-    if [ ${#MISSING_BUILD_TOOLS[@]} -gt 0 ]; then
-        echo "Installing build tools: ${MISSING_BUILD_TOOLS[*]}"
-        case "$PKG_MANAGER" in
-            apt)
-                sudo apt update -qq
-                sudo apt install -y ${MISSING_BUILD_TOOLS[*]} > /dev/null 2>&1
-                ;;
-            dnf)
-                sudo dnf install -y ${MISSING_BUILD_TOOLS[*]} > /dev/null 2>&1
-                ;;
-            yum)
-                sudo yum install -y ${MISSING_BUILD_TOOLS[*]} > /dev/null 2>&1
-                ;;
-            pacman)
-                sudo pacman -S --noconfirm ${MISSING_BUILD_TOOLS[*]} > /dev/null 2>&1
-                ;;
-        esac
-    fi
-    
-    # Define install path
-    LIBJPEG_INSTALL_PATH="/opt/libjpeg-turbo"
-    LIBJPEG_BUILD_TMP="/tmp/libjpeg-turbo-build"
-    
-    # Check if it's already compiled there
-    if [ -f "$LIBJPEG_INSTALL_PATH/lib/libturbojpeg.so.0" ] || [ -f "$LIBJPEG_INSTALL_PATH/lib64/libturbojpeg.so.0" ]; then
-        echo "[INFO] Found pre-compiled libjpeg-turbo at $LIBJPEG_INSTALL_PATH"
-        LIBJPEG_FOUND=1
-    else
-        # Clean old build if it exists
-        rm -rf "$LIBJPEG_BUILD_TMP" 2>/dev/null || true
-        mkdir -p "$LIBJPEG_BUILD_TMP"
-        
-        echo "Downloading latest libjpeg-turbo 3.x release..."
-        cd "$LIBJPEG_BUILD_TMP"
-        
-        # Get the latest 3.x release URL
-        LATEST_URL=$(python3 << 'PYTHON_GET_URL'
-import urllib.request
-import json
-try:
-    request = urllib.request.Request(
-        "https://api.github.com/repos/libjpeg-turbo/libjpeg-turbo/releases",
-        headers={"User-Agent": "FIDWAC-Installer"}
-    )
-    with urllib.request.urlopen(request, timeout=10) as response:
-        data = json.loads(response.read())
-        for release in data:
-            tag = release.get("tag_name", "")
-            if tag.startswith("3."):
-                # Find the source tarball
-                for asset in release.get("assets", []):
-                    if asset["name"].endswith(".tar.gz") and "windows" not in asset["name"].lower():
-                        print(asset["browser_download_url"])
-                        exit(0)
-        print("ERROR")
-except Exception as e:
-    print("ERROR")
-PYTHON_GET_URL
-        )
-        
-        if [ "$LATEST_URL" = "ERROR" ] || [ -z "$LATEST_URL" ]; then
-            echo "[ERROR] Could not determine latest libjpeg-turbo 3.x release"
-            echo "Please install manually: sudo apt install libjpeg-turbo-dev (and ensure version 3.0+)"
-            exit 1
-        fi
-        
-        echo "URL: $LATEST_URL"
-        
-        # Try wget first, then curl
-        if command -v wget &> /dev/null; then
-            if ! wget -q "$LATEST_URL" -O libjpeg-turbo.tar.gz; then
-                echo "[ERROR] Failed to download libjpeg-turbo"
-                exit 1
-            fi
-        elif command -v curl &> /dev/null; then
-            if ! curl -sL "$LATEST_URL" -o libjpeg-turbo.tar.gz; then
-                echo "[ERROR] Failed to download libjpeg-turbo"
-                exit 1
-            fi
-        else
-            echo "[ERROR] Neither wget nor curl found. Cannot download libjpeg-turbo"
-            exit 1
-        fi
-        
-        echo "Extracting..."
-        tar xzf libjpeg-turbo.tar.gz
-        cd libjpeg-turbo-* 2>/dev/null || { echo "[ERROR] Failed to extract"; exit 1; }
-        
-        echo "Configuring and building (this may take a few minutes)..."
-        mkdir build && cd build
-        
-        if ! cmake .. -DCMAKE_INSTALL_PREFIX="$LIBJPEG_INSTALL_PATH" -DCMAKE_BUILD_TYPE=Release > /dev/null 2>&1; then
-            echo "[ERROR] CMake configuration failed"
-            echo "Make sure cmake and build tools are installed"
-            exit 1
-        fi
-        
-        if ! make -j$(nproc) > /dev/null 2>&1; then
-            echo "[ERROR] Build failed"
-            exit 1
-        fi
-        
-        echo "Installing to $LIBJPEG_INSTALL_PATH..."
-        sudo make install > /dev/null 2>&1
-        
-        if [ $? -ne 0 ]; then
-            echo "[ERROR] Installation failed (sudo required)"
-            exit 1
-        fi
-        
-        echo "[OK] libjpeg-turbo compiled and installed"
-        LIBJPEG_FOUND=1
-    fi
-    
-    cd "$PROJECT_ROOT"
-    
-    # Set environment variables for PyTurboJPEG
-    export LD_LIBRARY_PATH="$LIBJPEG_INSTALL_PATH/lib64:$LIBJPEG_INSTALL_PATH/lib:$LD_LIBRARY_PATH"
-    echo ""
-    echo "Updated LD_LIBRARY_PATH for this session"
-    echo ""
-fi
-
 # Critical section: require successful completion
 set -e
 
@@ -375,96 +276,148 @@ else
     exit 1
 fi
 
+# Install CUDA toolkit for the Numba CUDA path if a GPU stack is available.
+if ensure_cuda_runtime >/tmp/fidwac_cuda_detect.log 2>&1; then
+    CUDA_ROOT="$(detect_cuda_root)"
+    export CUDA_HOME="$CUDA_ROOT"
+    export PATH="$CUDA_ROOT/bin:$PATH"
+    export LD_LIBRARY_PATH="$CUDA_ROOT/lib:${LD_LIBRARY_PATH:-}"
+    echo "[OK] CUDA runtime detected: $CUDA_ROOT"
+    if bash "$PROJECT_ROOT/engine/gpu_u8/build.sh" >/tmp/fidwac_gpu_build.log 2>&1; then
+        echo "[OK] GPU CUDA libraries built successfully"
+    else
+        echo "[WARN] GPU CUDA libraries could not be built. CPU-only mode remains active. See /tmp/fidwac_gpu_build.log"
+    fi
+else
+    echo "[WARN] No CUDA toolkit detected; GPU path is disabled, CPU mode remains active."
+fi
+
 echo ""
 
 # Allow non-fatal errors again
 set +e
 
+# libjpeg-turbo (JPEG quality mode, cm=1): built from install/turbojpeg (optional, non-fatal).
+# Online, install/turbojpeg is refreshed to the newest GitHub release; offline, the copy there is used.
+JPEG_SRC="$PROJECT_ROOT/install/turbojpeg"
+JPEG_PREFIX="$VENV_DIR/libjpeg-turbo"
+JPEG_LOG="/tmp/fidwac_libjpeg_build.log"
+JPEG_REPO="https://github.com/libjpeg-turbo/libjpeg-turbo"
+JPEG_TMP="$(mktemp -d)" || JPEG_TMP=""
+if [ -z "$JPEG_TMP" ]; then
+    echo "[WARN] No temporary directory, skipping libjpeg-turbo (JPEG quality mode, cm=1 unavailable)."
+else
+    LATEST_TAG="$(curl -fsSL --connect-timeout 15 -o /dev/null -w '%{url_effective}' "$JPEG_REPO/releases/latest" 2>/dev/null | sed -n 's#.*/releases/tag/\([0-9][0-9.]*\)$#\1#p')"
+    LOCAL_VER="$(sed -n 's/^set(VERSION \([0-9.]*\))/\1/p' "$JPEG_SRC/CMakeLists.txt" 2>/dev/null | head -1)"
+    if [ -z "$LATEST_TAG" ]; then
+        echo "[WARN] GitHub not reachable, using install/turbojpeg as it is (${LOCAL_VER:-missing})."
+    elif [ "$LOCAL_VER" != "$LATEST_TAG" ]; then
+        echo "Downloading libjpeg-turbo $LATEST_TAG (latest release) ..."
+        if curl -fsSL --retry 2 --connect-timeout 15 -o "$JPEG_TMP/src.tar.gz" \
+                "$JPEG_REPO/releases/download/$LATEST_TAG/libjpeg-turbo-$LATEST_TAG.tar.gz" \
+           && tar -xzf "$JPEG_TMP/src.tar.gz" -C "$JPEG_TMP"; then
+            rm -rf "$JPEG_SRC"
+            cp -r "$JPEG_TMP/libjpeg-turbo-$LATEST_TAG" "$JPEG_SRC"
+            LOCAL_VER="$LATEST_TAG"
+        else
+            echo "[WARN] Download failed, using install/turbojpeg as it is (${LOCAL_VER:-missing})."
+        fi
+    fi
+    if [ -f "$JPEG_SRC/CMakeLists.txt" ] && command -v cmake > /dev/null 2>&1; then
+        echo "Building libjpeg-turbo ${LOCAL_VER:-unknown} into $JPEG_PREFIX ..."
+        if cmake -S "$JPEG_SRC" -B "$JPEG_TMP/build" -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_INSTALL_PREFIX="$JPEG_PREFIX" -DCMAKE_INSTALL_LIBDIR=lib \
+                -DENABLE_STATIC=OFF -DWITH_TESTS=OFF -DWITH_TOOLS=OFF > "$JPEG_LOG" 2>&1 \
+           && cmake --build "$JPEG_TMP/build" -j"$(nproc)" >> "$JPEG_LOG" 2>&1 \
+           && cmake --install "$JPEG_TMP/build" >> "$JPEG_LOG" 2>&1 \
+           && [ -f "$JPEG_PREFIX/lib/libturbojpeg.so.0" ]; then
+            echo "[OK] $(grep -a -m1 -o 'libjpeg-turbo version [0-9.]*' "$JPEG_PREFIX/lib/libturbojpeg.so.0") installed to $JPEG_PREFIX"
+            rm -f "$JPEG_LOG"
+        else
+            echo "[WARN] libjpeg-turbo not built, JPEG quality mode (cm=1) is unavailable. See $JPEG_LOG"
+        fi
+    else
+        echo "[WARN] install/turbojpeg or cmake missing, JPEG quality mode (cm=1) is unavailable."
+    fi
+    rm -rf "$JPEG_TMP"
+fi
+echo ""
+
+# SZ3 backend (cm=8): build pysz from install/sz3 (optional, non-fatal).
+# Build from a temporary copy so cmake/setuptools output never lands in install/sz3.
+if [ -f "install/sz3/tools/pysz/setup.py" ]; then
+    echo "Building the SZ3 backend (pysz) from install/sz3 ..."
+    PYSZ_LOG="/tmp/fidwac_pysz_build.log"
+    SZ3_TMP="$(mktemp -d)"
+    cp -r install/sz3 "$SZ3_TMP/sz3"
+    if SZ3_SRC="$SZ3_TMP/sz3" pip install --force-reinstall --no-deps \
+            "$SZ3_TMP/sz3/tools/pysz" > "$PYSZ_LOG" 2>&1; then
+        echo "[OK] SZ3 backend installed from install/sz3"
+        rm -f "$PYSZ_LOG"
+    else
+        echo "[WARN] SZ3 backend not built, --method sz3 is unavailable. See $PYSZ_LOG"
+        echo "       Needs cmake >= 3.24, a C++ compiler and zstd development files (libzstd-dev)."
+    fi
+    rm -rf "$SZ3_TMP"
+else
+    echo "[WARN] install/sz3 not found, --method sz3 is unavailable."
+fi
+echo ""
+
+# SZ3 command-line tool: external comparator for analysis/tests/run_tests.py (optional, non-fatal).
+# The bundled install/sz3 keeps only the pysz binding (tools/sz3 is absent), so the CLI
+# is built from the matching upstream release into install/sz3/bin/sz3 and linked into
+# the venv. The test runner checks install/sz3 first, which also resolves its version.
+SZ3_CLI_BIN="$PROJECT_ROOT/install/sz3/bin/sz3"
+if [ -x "$SZ3_CLI_BIN" ]; then
+    echo "[OK] sz3 CLI already present: $SZ3_CLI_BIN"
+else
+    SZ3_VER="$(sed -n 's/^project(SZ3 VERSION \([0-9.]*\)).*/\1/p' install/sz3/CMakeLists.txt | head -1)"
+    if [ -n "$SZ3_VER" ] && command -v cmake > /dev/null 2>&1 && command -v git > /dev/null 2>&1; then
+        echo "Building the SZ3 $SZ3_VER command-line tool (external comparator for analysis/tests) ..."
+        SZ3C_TMP="$(mktemp -d)"
+        if git clone --depth 1 --branch "v$SZ3_VER" https://github.com/szcompressor/SZ3.git "$SZ3C_TMP/SZ3" > /dev/null 2>&1 \
+           && cmake -S "$SZ3C_TMP/SZ3" -B "$SZ3C_TMP/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF > /dev/null 2>&1 \
+           && cmake --build "$SZ3C_TMP/build" --target sz3 -j"$(nproc)" > /dev/null 2>&1 \
+           && [ -x "$SZ3C_TMP/build/tools/sz3/sz3" ]; then
+            mkdir -p "$PROJECT_ROOT/install/sz3/bin"
+            cp "$SZ3C_TMP/build/tools/sz3/sz3" "$SZ3_CLI_BIN"
+            ln -sf "$SZ3_CLI_BIN" "$VENV_DIR/bin/sz3"
+            echo "[OK] sz3 $SZ3_VER CLI installed to install/sz3/bin/sz3"
+        else
+            echo "[WARN] sz3 CLI not built, the 'sz3' test variants are unavailable."
+        fi
+        rm -rf "$SZ3C_TMP"
+    else
+        echo "[WARN] sz3 CLI skipped (needs git, cmake and install/sz3/CMakeLists.txt)."
+    fi
+fi
+echo ""
+
+# 7-Zip-zstd (7zz, https://github.com/mcmilk/7-Zip-zstd): archive tool for .7z output (optional, non-fatal).
+# Installs the newest Linux release to /usr/local/bin/7zz; sudo asks for the password in this terminal.
+echo "Installing 7-Zip-zstd (7zz) ..."
+if ! python3 install/install_7zz.py; then
+    echo "[WARN] 7zz is not installed: .7z archives fall back to py7zr (slower). See install/README.md."
+fi
+echo ""
+
 # Verify installation
 echo "Verifying installation..."
-python3 -c "import numpy, scipy, rasterio, msgpack, py7zr, tqdm, numba; print('[OK] Core dependencies')" 
+python3 -c "import numpy, scipy, rasterio, msgpack, py7zr, tqdm, numba, flask; print('[OK] Core dependencies')" 
 if [ $? -ne 0 ]; then
     echo "[ERROR] Core dependencies verification failed!"
     exit 1
 fi
 
-# Check PyTurboJPEG compatibility (REQUIRED)
+# TurboJPEG (JPEG quality mode, cm=1) is optional; a failure does not stop the setup.
 echo ""
-echo "Checking PyTurboJPEG/libjpeg-turbo compatibility..."
-python3 << 'PYTHON_CHECK'
-import sys
-import os
-
-try:
-    # Try to import turbojpeg
-    from turbojpeg import TurboJPEG
-    print("[OK] PyTurboJPEG 2.0+ with libjpeg-turbo 3.0+ is available")
-    sys.exit(0)
-except OSError as e:
-    error_msg = str(e)
-    if "libjpeg-turbo" in error_msg.lower() and "3.0" in error_msg.lower():
-        print("[ERROR] PyTurboJPEG requires libjpeg-turbo 3.0 or later")
-        print(f"Error details: {error_msg}")
-        print("")
-        print("Your current libjpeg-turbo version is too old.")
-        sys.exit(1)
-    elif "libjpeg" in error_msg.lower():
-        print("[ERROR] libjpeg-turbo not found or incompatible")
-        print(f"Error details: {error_msg}")
-        sys.exit(1)
-    else:
-        print(f"[ERROR] PyTurboJPEG initialization failed: {error_msg}")
-        sys.exit(1)
-except ImportError as e:
-    print(f"[ERROR] PyTurboJPEG not installed: {e}")
-    sys.exit(1)
-PYTHON_CHECK
-
-TURBOJPEG_CHECK=$?
-if [ $TURBOJPEG_CHECK -ne 0 ]; then
-    echo ""
-    echo "========================================"
-    echo "ACTION REQUIRED: libjpeg-turbo 3.0+"
-    echo "========================================"
-    echo ""
-    echo "PyTurboJPEG requires libjpeg-turbo 3.0 or later for SIMD encoding."
-    echo "This is MANDATORY for efficient compression of large files (>2GB)."
-    echo ""
-    echo "To install/upgrade libjpeg-turbo 3.0+:"
-    echo ""
-    case "$PKG_MANAGER" in
-        apt)
-            echo "Debian/Ubuntu:"
-            echo "  sudo apt remove libjpeg62-turbo-dev libjpeg-turbo 2>/dev/null || true"
-            echo "  sudo apt update"
-            echo "  sudo apt install libjpeg-turbo-dev"
-            ;;
-        dnf)
-            echo "Fedora/RHEL 8+:"
-            echo "  sudo dnf remove libjpeg-turbo-devel 2>/dev/null || true"
-            echo "  sudo dnf install libjpeg-turbo-devel"
-            ;;
-        yum)
-            echo "RHEL 7/CentOS:"
-            echo "  sudo yum remove libjpeg-turbo-devel 2>/dev/null || true"
-            echo "  sudo yum install libjpeg-turbo-devel"
-            ;;
-        pacman)
-            echo "Arch Linux:"
-            echo "  sudo pacman -R libjpeg-turbo 2>/dev/null || true"
-            echo "  sudo pacman -S libjpeg-turbo"
-            ;;
-        *)
-            echo "Your distribution:"
-            echo "  Install or upgrade 'libjpeg-turbo' development package to 3.0+"
-            ;;
-    esac
-    echo ""
-    echo "After installation, verify with:"
-    echo "  source $VENV_DIR/bin/activate"
-    echo "  python3 -c 'from turbojpeg import TurboJPEG; print(\"OK\")'"
-    echo ""
-    exit 1
+echo "Checking TurboJPEG (JPEG quality mode, cm=1)..."
+if python3 -c "from compress.turbojpeg_loader import open_turbojpeg; open_turbojpeg()" > /dev/null 2>&1; then
+    echo "[OK] TurboJPEG ready"
+else
+    echo "[WARN] TurboJPEG not available, JPEG quality mode (cm=1) is disabled."
+    echo "       Needs cmake (nasm adds SIMD); rerun this script or see install/README.md."
 fi
 
 echo ""
@@ -510,19 +463,5 @@ echo "  source $VENV_DIR/bin/activate"
 echo "  python3 app.py"
 echo ""
 echo "Or use the script: run_linux.sh or in windows run_windows.bat"
+echo "Web GUI address: http://127.0.0.1:5010/"
 echo ""
-
-# Display libjpeg-turbo info if it was compiled
-if [ "$LIBJPEG_FOUND" = "1" ] && [ -n "$LIBJPEG_INSTALL_PATH" ]; then
-    echo "========================================"
-    echo "libjpeg-turbo Information"
-    echo "========================================"
-    echo ""
-    echo "libjpeg-turbo 3.0+ has been compiled and installed to:"
-    echo "  $LIBJPEG_INSTALL_PATH"
-    echo ""
-    echo "The run_linux.sh script will automatically set LD_LIBRARY_PATH."
-    echo "If you run the application manually, set it with:"
-    echo "  export LD_LIBRARY_PATH=$LIBJPEG_INSTALL_PATH/lib64:$LIBJPEG_INSTALL_PATH/lib:\$LD_LIBRARY_PATH"
-    echo ""
-fi
