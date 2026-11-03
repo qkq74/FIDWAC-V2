@@ -1,0 +1,60 @@
+name: Sync from ZSIP/FIDWaC
+
+# Mirrors the branch FIDWAC_v2.1 of the public repository ZSIP/FIDWaC into main: one commit with the
+# new state is added on top of the history, so nothing is force-pushed and older versions stay
+# reachable (the version submitted for review is the tag review-v2.0).
+# .github/ is kept from this repository; README.md is rebuilt from .github/mirror-note.md and the
+# README_EN.md of the source.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-zsip
+  cancel-in-progress: false
+
+env:
+  SOURCE_URL: https://github.com/ZSIP/FIDWaC.git
+  SOURCE_BRANCH: FIDWAC_v2.1
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mirror the source branch
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 "$SOURCE_URL" "$SOURCE_BRANCH:refs/remotes/source/$SOURCE_BRANCH"
+          src=$(git rev-parse "refs/remotes/source/$SOURCE_BRANCH")
+          short=$(git rev-parse --short "$src")
+
+          # the last sync is recorded in the commit message
+          if git log -n 200 --format=%B | grep -q "Source commit: ZSIP/FIDWaC@$src"; then
+            echo "Already up to date with ZSIP/FIDWaC@$short"
+            exit 0
+          fi
+
+          # state of the source on top of the current history; .github/ stays ours
+          git read-tree -u --reset "$src"
+          git checkout HEAD -- .github
+          { cat .github/mirror-note.md; echo; cat README_EN.md; } > README.md
+          git add -A
+
+          if git diff --cached --quiet HEAD; then
+            echo "The tree did not change (source ZSIP/FIDWaC@$short)"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -q -m "Sync with ZSIP/FIDWaC $SOURCE_BRANCH ($short)" -m "Source commit: ZSIP/FIDWaC@$src"
+          git push origin HEAD:main
