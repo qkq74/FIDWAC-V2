@@ -264,7 +264,6 @@ def _apply_args_to_config(args: argparse.Namespace, config: Config) -> None:
     if args.crs is not None:
         c.crs = args.crs
 
-    # Model / prediction settings
     if args.backend is not None:
         m.backend = args.backend
     if args.advanced_heuristic is not None:
@@ -282,7 +281,6 @@ def _apply_args_to_config(args: argparse.Namespace, config: Config) -> None:
     if args.uint8_L_prediction_scale is not None:
         m.uint8_L_prediction_scales = [args.uint8_L_prediction_scale]
 
-    # Output settings
     if args.compression_method is not None:
         o.compression_method = args.compression_method
     if args.lzma2_block_size is not None:
@@ -290,7 +288,6 @@ def _apply_args_to_config(args: argparse.Namespace, config: Config) -> None:
     if args.quiet:
         o.quiet = True
 
-    # Performance settings
     if args.verify_with_full_idct is not None:
         p.verify_with_full_idct = args.verify_with_full_idct
     if args.l2_precheck is not None:
@@ -436,7 +433,6 @@ def main():
     _apply_args_to_config(args, config)
     num_processes = _resolve_num_processes(args, args.input)
 
-    # Check input file
     input_path = args.input
     if not os.path.exists(input_path):
         print(f"Error: Input file not found: {input_path}")
@@ -514,15 +510,21 @@ def main():
         elif output_is_archive and method == "sz3":
             from compress.compression_sz3 import compress_sz3_archive
 
+            eps_int = (
+                config.compression.uint8_accuracy
+                if config.compression.uint8_accuracy_mode
+                else None
+            )
             if output_path.lower().endswith(".7z"):
-                result_path, max_err = compress_sz3_archive(
+                result_path, max_err, valid = compress_sz3_archive(
                     input_path,
                     output_path,
                     config.compression.accuracy,
                     quiet=config.output.quiet,
                     crs=config.compression.crs,
+                    eps_int=eps_int,
                 )
-                tag = "VT" if max_err <= config.compression.accuracy else "VF"
+                tag = "VT" if valid else "VF"
                 print(f"VALIDITY:{tag}", flush=True)
             else:
                 base = os.path.splitext(os.path.basename(input_path))[0]
@@ -530,14 +532,15 @@ def main():
                     out_dir_for_func,
                     f"{base}_SZ3_eps{config.compression.accuracy}.7z",
                 )
-                result_path, max_err = compress_sz3_archive(
+                result_path, max_err, valid = compress_sz3_archive(
                     input_path,
                     result_path,
                     config.compression.accuracy,
                     quiet=config.output.quiet,
                     crs=config.compression.crs,
+                    eps_int=eps_int,
                 )
-                tag = "VT" if max_err <= config.compression.accuracy else "VF"
+                tag = "VT" if valid else "VF"
                 result_path = _tag_output(result_path, tag)
                 print(f"VALIDITY:{tag}", flush=True)
         elif output_is_archive:

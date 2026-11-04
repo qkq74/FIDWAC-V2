@@ -83,15 +83,9 @@ class GUIPanels:
         self._log_frame = None
         self._log_text = None
 
-    # =====================================================================
-    # MAIN TAB
-    # =====================================================================
-
     def _build_main_tab(self, parent, cfg):
-        # Input and Output, full width
         parent.columnconfigure(0, weight=1)
 
-        # ── INPUT (full width) ──────────────────────────────────────────────
         f = ttk.LabelFrame(parent, text="Input", padding="8", style="Input.TLabelframe")
         f.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 4))
         f.columnconfigure(2, weight=1)
@@ -121,7 +115,6 @@ class GUIPanels:
         )
         self._op_label.grid(row=2, column=0, columnspan=4, sticky=tk.W)
 
-        # ── OUTPUT (full width) ─────────────────────────────────────────────
         f = ttk.LabelFrame(parent, text="Output", padding="8", style="Output.TLabelframe")
         f.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 4))
         f.columnconfigure(1, weight=1)
@@ -140,7 +133,6 @@ class GUIPanels:
         )
         self._output_label.grid(row=1, column=0, columnspan=3, sticky=tk.W)
 
-        # ── COMPRESSION SETTINGS (full width) ───────────────────────────────
         fc = ttk.LabelFrame(
             parent, text="Compression Settings", padding="8", style="Compress.TLabelframe"
         )
@@ -150,7 +142,6 @@ class GUIPanels:
         self._build_float_section(fc, cfg)
         self._build_uint8_section(fc, cfg)
 
-        # Allowed block sizes checkboxes
         self.allow_n8 = tk.BooleanVar(value=8 in cfg.compression.allowed_block_sizes)
         self.allow_n16 = tk.BooleanVar(value=16 in cfg.compression.allowed_block_sizes)
         self.allow_n32 = tk.BooleanVar(value=32 in cfg.compression.allowed_block_sizes)
@@ -211,13 +202,15 @@ class GUIPanels:
         )
         float_frame.grid(row=0, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(0, 4))
         float_frame.columnconfigure(1, weight=1)
+        float_frame.columnconfigure(2, weight=1)
 
         # Accuracy: slider, typed value (spinbox) and quick buttons share one variable
         ttk.Label(float_frame, text="Accuracy (float):").grid(row=0, column=0, sticky=tk.W, pady=3)
         self.accuracy = tk.DoubleVar(value=cfg.compression.accuracy)
         self._acc_text = tk.StringVar(value=f"{cfg.compression.accuracy:.3f}")
         acc_frame = ttk.Frame(float_frame)
-        acc_frame.grid(row=0, column=1, sticky=tk.W)
+        acc_frame.grid(row=0, column=1, columnspan=2, sticky=(tk.W, tk.E))
+        acc_frame.columnconfigure(0, weight=1)
         _tip(
             ttk.Scale(
                 acc_frame,
@@ -225,11 +218,11 @@ class GUIPanels:
                 to=1.0,
                 orient=tk.HORIZONTAL,
                 variable=self.accuracy,
-                length=200,
+                length=120,
                 command=lambda v: self._acc_text.set(f"{float(v):.3f}"),
             ),
             "accuracy",
-        ).grid(row=0, column=0, sticky=tk.W)
+        ).grid(row=0, column=0, sticky=(tk.W, tk.E))
         self._acc_spin = _tip(
             ttk.Spinbox(
                 acc_frame,
@@ -243,7 +236,7 @@ class GUIPanels:
             ),
             "accuracy",
         )
-        self._acc_spin.grid(row=0, column=1, sticky=tk.W, padx=4)
+        self._acc_spin.grid(row=0, column=1, sticky=tk.E, padx=(8, 0))
         self._acc_spin.bind("<Return>", lambda _e: self._commit_accuracy())
         self._acc_spin.bind("<FocusOut>", lambda _e: self._commit_accuracy())
         self._acc_text.trace_add("write", lambda *_a: self._follow_typed_accuracy())
@@ -256,10 +249,10 @@ class GUIPanels:
                 preset_frame,
                 text=label,
                 width=5,
+                style="Preset.TButton",
                 command=lambda v=val: self.set_accuracy(v),
-            ).pack(side=tk.LEFT, padx=1)
+            ).pack(side=tk.LEFT, padx=(0, 3))
 
-        # Compression path selector
         ttk.Label(float_frame, text="Method:").grid(row=1, column=0, sticky=tk.W, pady=3)
         self.method = tk.StringVar(value=getattr(cfg.compression, "method", "dct"))
         method_combo = _tip(
@@ -279,14 +272,13 @@ class GUIPanels:
             text="dct = standard / pred = cm=7 / sz3 = external cm=8",
             foreground="gray",
             font=("TkDefaultFont", 8),
-        ).grid(row=1, column=2, sticky=tk.W, padx=(10, 0))
+        ).grid(row=2, column=1, columnspan=2, sticky=tk.W)
 
-        # Block size + auto-select
-        ttk.Label(float_frame, text="Block size:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Label(float_frame, text="Block size:").grid(row=3, column=0, sticky=tk.W, pady=3)
         self.block_size = tk.StringVar(value=str(cfg.compression.block_size))
         self.auto_select = tk.BooleanVar(value=cfg.compression.auto_select_block_size)
         bs_frame = ttk.Frame(float_frame)
-        bs_frame.grid(row=2, column=1, sticky=tk.W)
+        bs_frame.grid(row=3, column=1, columnspan=2, sticky=tk.W)
         self._block_size_cb = _tip(
             ttk.Combobox(
                 bs_frame,
@@ -309,8 +301,7 @@ class GUIPanels:
         ).pack(side=tk.LEFT, padx=10)
         self._on_auto_select_change()
 
-        # Backend
-        ttk.Label(float_frame, text="Backend:").grid(row=3, column=0, sticky=tk.W, pady=3)
+        ttk.Label(float_frame, text="Backend:").grid(row=4, column=0, sticky=tk.W, pady=3)
         self.backend = tk.StringVar(value=cfg.model.backend)
         self._backend_cb = _tip(
             ttk.Combobox(
@@ -322,7 +313,7 @@ class GUIPanels:
             ),
             "backend",
         )
-        self._backend_cb.grid(row=3, column=1, sticky=tk.W, pady=3)
+        self._backend_cb.grid(row=4, column=1, sticky=tk.W, pady=3)
         self._backend_cb.bind("<<ComboboxSelected>>", self._on_backend_change)
 
     def _build_uint8_section(self, parent, cfg):
@@ -373,7 +364,6 @@ class GUIPanels:
             "uint8_lossless",
         ).pack(side=tk.LEFT, padx=(6, 0))
 
-        # Quality slider
         self._rq_label_widget = ttk.Label(uint_frame, text="Quality (%):")
         self._rq_label_widget.grid(row=1, column=0, sticky=tk.W, pady=3)
         self.rgb_quality = tk.IntVar(value=cfg.compression.rgb_quality)
@@ -395,7 +385,6 @@ class GUIPanels:
         self._rq_label = ttk.Label(rq_frame, text=f"{cfg.compression.rgb_quality}%", width=4)
         self._rq_label.pack(side=tk.LEFT, padx=4)
 
-        # Accuracy spinbox
         self._u8acc_label_widget = ttk.Label(uint_frame, text="Accuracy (8-bit):")
         self._u8acc_label_widget.grid(row=2, column=0, sticky=tk.W, pady=3)
         self.uint8_accuracy = tk.IntVar(value=cfg.compression.uint8_accuracy)
@@ -411,7 +400,6 @@ class GUIPanels:
         )
         self._u8acc_hint.grid(row=3, column=0, columnspan=2, sticky=tk.W, padx=(20, 0), pady=(0, 4))
 
-        # RGB channel indices
         self._u8rgb_label = ttk.Label(uint_frame, text="RGB channels:")
         self._u8rgb_label.grid(row=4, column=0, sticky=tk.W, pady=3)
         _rgb_def = list(getattr(cfg.compression, "rgb_channel_indices", [1, 2, 3]))
@@ -437,12 +425,7 @@ class GUIPanels:
         self.ycbcr_cb_mult = tk.DoubleVar(value=cfg.compression.ycbcr_cb_multiplier)
         self.ycbcr_cr_mult = tk.DoubleVar(value=cfg.compression.ycbcr_cr_multiplier)
 
-    # =====================================================================
-    # ADVANCED TAB
-    # =====================================================================
-
     def _build_advanced_tab(self, parent, cfg):
-        # ── Two-column layout ─────────────────────────────────────────────
         parent.columnconfigure(0, weight=1)
         parent.columnconfigure(1, weight=1)
 
@@ -453,7 +436,6 @@ class GUIPanels:
         left.columnconfigure(0, weight=1)
         right.columnconfigure(0, weight=1)
 
-        # ── LEFT: Model / Search ──────────────────────────────────────────
         fm = ttk.LabelFrame(left, text="Model / Search", padding="8", style="Model.TLabelframe")
         fm.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=4)
         fm.columnconfigure(1, weight=1)
@@ -497,7 +479,6 @@ class GUIPanels:
             "backscan_break",
         )
 
-        # ── LEFT: Auto-select ─────────────────────────────────────────────
         fa = ttk.LabelFrame(
             left, text="Auto-select Settings", padding="8", style="Model.TLabelframe"
         )
@@ -535,11 +516,9 @@ class GUIPanels:
             "std_medium",
         )
 
-        # Hidden vars
         self.source_dir = tk.StringVar(value=cfg.source_dir)
         self.results_dir = tk.StringVar(value=cfg.results_dir)
 
-        # ── RIGHT: Parallel Processing ────────────────────────────────────
         fp = ttk.LabelFrame(
             right, text="Parallel Processing", padding="8", style="Compress.TLabelframe"
         )
@@ -587,7 +566,6 @@ class GUIPanels:
             side=tk.LEFT
         )
 
-        # ── RIGHT: Output Settings ────────────────────────────────────────
         fo = ttk.LabelFrame(right, text="Output Settings", padding="8", style="Perf.TLabelframe")
         fo.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=4)
         fo.columnconfigure(1, weight=1)
@@ -697,10 +675,6 @@ class GUIPanels:
             "show_log_panel",
         ).grid(row=7, column=0, columnspan=2, sticky=tk.W)
 
-    # =====================================================================
-    # BUTTON BAR, PROGRESS, LOG
-    # =====================================================================
-
     def _build_buttons(self, parent, row=1):
         f = ttk.Frame(parent)
         f.grid(row=row, column=0, pady=(6, 2), sticky=tk.W)
@@ -747,12 +721,7 @@ class GUIPanels:
         sb = ttk.Scrollbar(self._log_frame, command=self._log_text.yview)
         sb.grid(row=0, column=1, sticky=(tk.N, tk.S))
         self._log_text.configure(yscrollcommand=sb.set)
-        # Setup color tags for log output
         setup_log_text_colors(self._log_text)
-
-    # =====================================================================
-    # HELPER: labelled spinbox row
-    # =====================================================================
 
     def _add_spinbox(self, parent, row, label, var_name, value, from_, to, tip_key=None):
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky=tk.W, pady=2)

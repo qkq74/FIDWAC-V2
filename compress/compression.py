@@ -54,9 +54,6 @@ from .compression_dct import (
     compress_channel_dct_strips,
 )
 
-# ---------------------------------------------------------------------------
-# Public: file discovery
-# ---------------------------------------------------------------------------
 
 
 def find_raster_files(directory: str, recursive: bool = True) -> List[str]:
@@ -76,9 +73,22 @@ def find_raster_files(directory: str, recursive: bool = True) -> List[str]:
     return sorted(set(files))
 
 
-# ---------------------------------------------------------------------------
-# Public: main entry point
-# ---------------------------------------------------------------------------
+
+def _select_threading_layer(config: Config) -> None:
+    """Use numba's fork-safe workqueue layer for the heuristic backend, then warm up the kernels.
+
+    The default GNU OpenMP layer aborts forked pool workers that run a parallel kernel after the
+    parent has run one ("fork() called from a process already using GNU OpenMP"), and the pool then
+    waits forever. The advanced heuristic does exactly that. The layer can only be chosen before the
+    first parallel launch, so the warm-up that follows fixes it; the binary backend keeps numba's default.
+    """
+    if str(config.model.backend).lower() == "heuristic":
+        import numba
+
+        numba.config.THREADING_LAYER = "workqueue"
+    from predictor.predictor import warm_up_parallel_kernels
+
+    warm_up_parallel_kernels()
 
 
 def compress_image(
@@ -112,6 +122,7 @@ def compress_image(
 
     os.makedirs(output_dir, exist_ok=True)
     start_time = time.time()
+    _select_threading_layer(config)
 
     if not config.output.quiet:
         print(f"Loading: {file_path}")
@@ -120,7 +131,6 @@ def compress_image(
     config._source_has_nodata = meta["has_nodata"]
     H, W = meta["H"], meta["W"]
 
-    # Route to JPEG path for uint8 RGB (exactly 3 data bands, quality mode)
     u8_accuracy_mode = getattr(config.compression, "uint8_accuracy_mode", False)
     if (
         meta["all_uint8"]
@@ -148,7 +158,6 @@ def compress_image(
     # Log redirect notice if user selected quality mode but the image is not exactly 3-channel RGB
     if meta["all_uint8"] and not u8_accuracy_mode and not config.compression.lossless and not config.output.quiet:
         if meta["num_channels"] != 3:
-            # Check if per-block RGB path (cm=6) is configured
             rgb_indices = getattr(config.compression, "rgb_channel_indices", [])
             ycbcr_per_block_mode = getattr(config.compression, "ycbcr_per_block_mode", False)
             if len(rgb_indices) == 3 and ycbcr_per_block_mode:
@@ -160,17 +169,12 @@ def compress_image(
     if config.compression.lossless and not meta["all_uint8"] and not config.output.quiet:
         print(f"  [INFO] Lossless PNG mode requires 8-bit (uint8) data. Selected non-8-bit image ({meta['band_dtypes'][0]}). Redirecting to accuracy-controlled DCT path (cm=3).")
 
-    # Per-channel DCT / lossless path
     result = _compress_per_channel(
         src, file_path, meta, config, num_processes, output_dir, start_time, skip_archive
     )
     src.close()
     return result
 
-
-# ---------------------------------------------------------------------------
-# Internal: raster metadata
-# ---------------------------------------------------------------------------
 
 
 def _open_raster(file_path: str, config: Config):
@@ -229,10 +233,6 @@ def _open_raster(file_path: str, config: Config):
     }
 
 
-# ---------------------------------------------------------------------------
-# Internal: per-channel loop (per-block RGB mode)
-# ---------------------------------------------------------------------------
-
 
 def _compress_per_channel_rgb(
     src, file_path, meta, config, num_processes, output_dir, start_time, skip_archive
@@ -253,10 +253,8 @@ def _compress_per_channel_rgb(
     u8_accuracy_mode = getattr(config.compression, "uint8_accuracy_mode", False)
     rgb_indices = getattr(config.compression, "rgb_channel_indices", [])
 
-    # Convert 1-based indices to 0-based
     rgb_indices_0based = [int(i) - 1 for i in rgb_indices]
 
-    # Identify RGB vs non-RGB channels
     rgb_channels = [i for i in rgb_indices_0based if i < num_channels]
     non_rgb_channels = [i for i in range(num_channels) if i not in rgb_channels]
 
@@ -265,7 +263,6 @@ def _compress_per_channel_rgb(
         print(f"  RGB channels (per-block YCbCr): {[i+1 for i in rgb_channels]}")
         print(f"  Other channels (standard): {[i+1 for i in non_rgb_channels]}")
 
-    # Build YCbCr images for standard channels
     from .compression_dct import build_ycbcr_images
 
     if len(rgb_channels) == 3:
@@ -277,12 +274,10 @@ def _compress_per_channel_rgb(
             src, config, num_channels, all_uint8, data_band_indices
         )
 
-    # Collect all channel data - one entry per channel
     channels_data = [None] * num_channels
     max_error_global = 0.0
     all_valid = True
 
-    # Compress RGB channels together with per-block YCbCr
     if len(rgb_channels) == 3:
         r_idx, g_idx, b_idx = rgb_channels
         if not config.output.quiet:
@@ -335,7 +330,6 @@ def _compress_per_channel_rgb(
             "sf": coeffs_dict["sf"],
         }
 
-        # Encode coefficients with per-block multipliers
         ch_data = _encode_dct_channel_rgb(ch_data, coeffs_dict, block_size, padded_shape, u8_cfg)
         if coeffs_dict.get("nd") is not None:
             ch_data["nd"] = coeffs_dict["nd"]  # per-band NoData RLE masks (R, G, B)
@@ -355,7 +349,6 @@ def _compress_per_channel_rgb(
         if not validity:
             all_valid = False
 
-    # Compress remaining channels with standard method
     for ch_idx in non_rgb_channels:
         band_idx = data_band_indices[ch_idx]
         if not config.output.quiet:
@@ -391,7 +384,6 @@ def _compress_per_channel_rgb(
         if not validity:
             all_valid = False
 
-    # Build final dcv_compress structure with all channels
     dcv_compress = {
         "v": 3,
         "ch": num_channels,
@@ -426,10 +418,6 @@ def _compress_per_channel_rgb(
     )
 
 
-# ---------------------------------------------------------------------------
-# Internal: per-channel loop (original)
-# ---------------------------------------------------------------------------
-
 
 def _compress_per_channel(
     src, file_path, meta, config, num_processes, output_dir, start_time, skip_archive
@@ -450,17 +438,16 @@ def _compress_per_channel(
     rgb_indices = getattr(config.compression, "rgb_channel_indices", [])
     if (
         u8_accuracy_mode
+        and not config.compression.lossless
         and len(rgb_indices) == 3
         and ycbcr_per_block_mode
         and all_uint8
         and num_channels >= 3
     ):
-        # per-block RGB path
         return _compress_per_channel_rgb(
             src, file_path, meta, config, num_processes, output_dir, start_time, skip_archive
         )
 
-    # Standard independent per-channel compression
     max_error_global = 0.0
     all_valid = True
     channel_block_sizes = []
@@ -643,11 +630,9 @@ def _compress_uint8_accuracy(
         by_strips = src.height * src.width > compression_dct.DCT_STRIP_PIXELS
         image_ch = None if by_strips else src.read(band_idx).astype(np.float32)
 
-    # Determine scaling factors to try
     if isinstance(u8_sf_cfg, list):
         sfs_to_try = list(u8_sf_cfg)
     else:
-        # If it's a single integer, try it and then its powers of 10
         sfs_to_try = []
         for exp in range(0, 4):  # try 1, 10, 100, 1000
             try_sf = 10**exp
@@ -661,7 +646,6 @@ def _compress_uint8_accuracy(
         u8_cfg = deepcopy(config)
         u8_cfg.compression.accuracy = u8_accuracy
 
-        # Set the dynamic scaling factor override and decimal places
         u8_cfg._scaling_factor_override = try_sf
         if try_sf > 1:
             u8_cfg.compression.decimal_places = int(np.ceil(np.log10(try_sf)))
@@ -750,7 +734,6 @@ def _encode_dct_channel_rgb(
     padded_W = padded_shape[1] if padded_shape and len(padded_shape) >= 2 else 0
     blocks_per_row = max(1, padded_W // block_size) if block_size > 0 and padded_W > 0 else 1
 
-    # Encode each channel separately with its own lengths
     encoded_channels = {}
     for ch in ["Y", "Cb", "Cr"]:
         # coeffs_dict[ch]['coeffs'] is already flattened from serialize_compressed_blocks_rgb
@@ -801,10 +784,6 @@ def _encode_dct_channel(
     return ch_data
 
 
-# ---------------------------------------------------------------------------
-# Internal: finalize archive
-# ---------------------------------------------------------------------------
-
 
 def _finalize_dct_archive(
     file_path,
@@ -853,7 +832,6 @@ def _finalize_dct_archive(
         file_path, config, output_dir, channel_block_sizes, all_uint8, u8_accuracy_mode, crs=raster_crs
     )
     validity_suffix = _validity_suffix(config, all_valid)
-    # Re-build with validity suffix
     output_path = _build_dct_output_path(
         file_path,
         config,
@@ -959,7 +937,9 @@ def _build_dct_output_path(
     )
     bs_label = str(unique_bs[0]) if len(unique_bs) == 1 else "-".join(str(n) for n in unique_bs)
 
-    if u8_accuracy_mode and all_uint8:
+    if config.compression.lossless and all_uint8:
+        acc_str = "Lossless"
+    elif u8_accuracy_mode and all_uint8:
         u8sf = getattr(config.compression, "uint8_scaling_factor", 10)
         if isinstance(u8sf, list):
             u8sf_str = "-".join(str(x) for x in u8sf)
@@ -999,7 +979,10 @@ def _print_dct_stats(
     print(f"  Original: {original_size / 1024:.1f} KB")
     print(f"  Compressed: {compressed_size / 1024:.1f} KB")
     print(f"  Ratio: {ratio:.2f}x")
-    if u8_accuracy_mode and all_uint8:
+    if config.compression.lossless and all_uint8:
+        print("  Accuracy: lossless (max error = 0)")
+        print(f"  Max error: {max_error_global:.1f}")
+    elif u8_accuracy_mode and all_uint8:
         u8_acc = config.compression.uint8_accuracy
         u8_sf = getattr(config.compression, "uint8_scaling_factor", 10)
         if isinstance(u8_sf, list):
@@ -1014,10 +997,6 @@ def _print_dct_stats(
     print(f"  Validity: {validity_str}")
     print(f"  Time: {elapsed:.2f}s")
 
-
-# =============================================================================
-# EXPORT
-# =============================================================================
 
 __all__ = [
     "compress_image",

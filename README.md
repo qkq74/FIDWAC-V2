@@ -51,9 +51,9 @@ FIDWAC v2 selects the compression mode automatically based on data type and flag
 
 | cm | Mode | Input data | Error guarantee | How to select |
 |----|------|------------|-----------------|---------------|
-| 1 | TurboJPEG (quality) | uint8, exactly 3 RGB bands | none (JPEG quality parameter) | default for 3-band uint8 without `--uint8-accuracy` and `--lossless` |
+| 1 | TurboJPEG (quality) | uint8, exactly 3 RGB bands | none (JPEG quality parameter) | 3-band uint8 with `--no-uint8-accuracy-mode` (the shipped `config.json` has `uint8_accuracy_mode: true`, so without this flag RGB goes to cm=6) |
 | 3 | DCT + DC predictor | float32/float64 (DEM/DTM), int16 | max error ≤ ε in raster units | `--method dct` + `--accuracy` (default for float) |
-| 4 | Lossless PNG Sub + zlib | uint8 | error = 0 (lossless) | `--lossless` |
+| 4 | Lossless PNG Sub + zlib | uint8, any number of bands | error = 0 (lossless) | `--lossless` (takes precedence over cm=5 and cm=6) |
 | 5 | DCT integer per band | uint8 / int8 / uint16 / int16 | max error ≤ ε per band | `--uint8-accuracy` |
 | 6 | Per-block YCbCr | uint8, ≥3 RGB bands | max error ≤ ε in RGB space | `--uint8-accuracy` + `--ycbcr-per-block` |
 | 7 | Predictive MED (near-lossless) | float/int, per band | max error ≤ bound (`.fpred`) | `--method pred` |
@@ -79,7 +79,7 @@ Version 2 adds Numba JIT acceleration for key mathematical operations, faster bl
 2. **Standard DCT compression (uint8 accuracy)** - intended for single-channel images such as LiDAR intensity, hillshade, or individual raster bands. It guarantees a maximum error <= epsilon in grayscale values (0-255), without colour-space conversion (`cm=5`).
 3. **Per-block YCbCr with cascading multipliers** - intended for multi-channel RGB imagery in accuracy mode. It guarantees a maximum error <= epsilon in RGB space by using block-wise fitting of coefficients and exact decoder-side RGB verification (`cm=6`).
 4. **TurboJPEG (SIMD)** - an alternative fast RGB path without accuracy mode, based on JPEG quality settings. It uses standard JPEG compression through libjpeg-turbo and does not provide a formal maximum-approximation-error guarantee. This is a very fast file-packing method, but it can introduce excessive uncontrolled noise. It does not provide a single-channel mode or a multi-channel mode for more than 3 RGB channels (`cm=1` with `meta.msgpack`).
-5. **Lossless compression** - intended for uint8 data requiring exact reconstruction (`max error = 0`). It uses a PNG Sub filter followed by zlib deflate. It does not provide a single-channel mode or a multi-channel mode for more than 3 RGB channels (`cm=4`).
+5. **Lossless compression** - intended for uint8 data requiring exact reconstruction (`max error = 0`). It uses a PNG Sub filter followed by zlib deflate. Every band is coded separately, so it works for one band as well as for any number of bands, and `--lossless` takes precedence over the accuracy modes (`cm=4`).
 
 In addition to the default DCT/JPEG/Lossless routing (`--method dct`), FIDWAC v2 exposes two explicit alternative/benchmark modes selectable via CLI (`--method pred|sz3`) and the web GUI:
 
@@ -553,7 +553,8 @@ graph TD
 Geo[Input GeoTIFF / Raster] --> Method{--method selector}
 
 Method -->|dct default| Route{Data type & mode}
-Method -->|pred, per band| cm7[Near-lossless MED predictive cm=7 .fpred]Method -->|sz3, per band| cm8[External SZ3 absolute-error cm=8 .sz3]
+Method -->|pred, per band| cm7[Near-lossless MED predictive cm=7 .fpred]
+Method -->|sz3, per band| cm8[External SZ3 absolute-error cm=8 .sz3]
 Route -->|float32 / int16| cm3[DCT compression: elevation data cm=3]
 Route -->|uint8 / 1 channel / accuracy mode| cm5[DCT compression: single-channel and multi-channel cm=5]
 Route -->|uint8 / RGB / accuracy mode| cm6[DCT compression: per-block YCbCr cm=6]
@@ -779,6 +780,8 @@ Version 2 compiles key incremental reconstruction, binary search, backscan, and 
 
 This removes Python overhead from the inner incremental-reconstruction and MED decoding loops. JIT compilation is cached for subsequent runs.
 
+The parallel kernels (`prange`) use numba's default OpenMP threading layer. With `--backend heuristic` the program switches to numba's `workqueue` layer before the first parallel launch, because the GNU OpenMP layer aborts the forked pool workers of the advanced heuristic and the run would hang.
+
 ---
 
 ## 6. Methodology for Predicting the Optimal DCT Chain Length
@@ -844,8 +847,8 @@ The implementation extracts **four DCT block features**: `ac_abs_mean`, `zero_ra
 $$
 \hat{L}_{adv} =
 \mathcal{T}_{grid}\left[
-\operatorname{qbin}\left(\log\left(1+\text{ac\_abs\_mean}\right)\right),
-\operatorname{qbin}\left(\text{zero\_ratio}\right)
+\mathrm{qbin}\left(\log\left(1+\text{ac\_abs\_mean}\right)\right),
+\mathrm{qbin}\left(\text{zero\_ratio}\right)
 \right]
 $$
 
@@ -1021,7 +1024,8 @@ The most important encoding modes are:
 | `cm=6` | RGB in accuracy mode | per-block YCbCr, separate Y/Cb/Cr storage with exact decoder-side RGB verification |
 | `cm=4` | uint8 lossless | lossless PNG Sub filter + zlib |
 | `cm=1` / `jpeg_strips` | RGB without accuracy mode | TurboJPEG quality-based, `rgb.bin + meta.msgpack` |
-| `cm=7` (`--method pred`) | float/int rasters (each band separately) | near-lossless scalar quantization + MED predictor residuals (`.fpred` / `.7z`) || `cm=8` (`--method sz3`) | float/int rasters (each band separately) | external SZ3 (`pysz`) absolute-error payload + NoData mask (`.sz3` / `.7z`) |
+| `cm=7` (`--method pred`) | float/int rasters (each band separately) | near-lossless scalar quantization + MED predictor residuals (`.fpred` / `.7z`) |
+| `cm=8` (`--method sz3`) | float/int rasters (each band separately) | external SZ3 (`pysz`) absolute-error payload + NoData mask (`.sz3` / `.7z`) |
 ### 8.1 Common DC/AC Storage
 
 For DCT paths, coefficients are stored in two streams:
@@ -1287,7 +1291,7 @@ The archive name encodes the most important settings, including automatic or fix
 Example scheme for the DCT path:
 
 ```text
-{name}_{AUTO|N}{N}_{Acc...|U8acc...}_tdct{dct}_dec{decimal}_CRS{crs}_{VT|VF|LF}.7z
+{name}_{AUTO|N}{N}_{Acc...|U8acc...|Lossless}_tdct{dct}_dec{decimal}_CRS{crs}_{VT|VF|LF}.7z
 ```
 
 For TurboJPEG, the name includes JPEG quality, for example `_Q85_`.
@@ -1391,7 +1395,7 @@ FIDWAC_v2/
 | `ycbcr_decode_verify` | `true` | verifies final `cm=6` candidate with exact decoder IDCT + RGB reconstruction |
 | `ycbcr_fallback_multipliers` | `1.0 -> 0.1` | accuracy-multiplier cascade for RGB YCbCr blocks |
 | `rgb_quality` | `85` | TurboJPEG quality, used only when `uint8_accuracy_mode=false` |
-| `lossless` | `false` | enables PNG/zlib lossless mode for uint8 (`cm=4`) |
+| `lossless` | `false` | enables PNG/zlib lossless mode for uint8 (`cm=4`); takes precedence over `uint8_accuracy_mode` and the per-block RGB path |
 
 #### `performance`
 
@@ -1475,6 +1479,10 @@ Each file of a job runs as a `compress.py --quiet` subprocess (an interpolation 
 
 
 
+---
+
+## 12. Summary of FIDWAC v2 Innovations
+
 FIDWAC v2 introduces the following improvements over FIDWaC v1:
 
 | No. | Area | FIDWaC v1 | FIDWAC v2 |
@@ -1504,10 +1512,10 @@ FIDWAC v2 introduces the following improvements over FIDWaC v1:
 | 23 | **uint8 accuracy mode (`cm=5`)** | No dedicated accuracy path for single 8-bit channels. | Maximum error guarantee for values 0-255, centering -128, and adaptive `scaling_factor`. |
 | 24 | **Lossless PNG mode (`cm=4`)** | No dedicated lossless uint8 mode. | PNG Sub filter + zlib, `max error = 0`. |
 | 25 | **Per-block RGB YCbCr (`cm=6`)** | No RGB path with error guarantee. | Default RGB accuracy path with cascading multipliers, RGB validation, and compact stream packing. |
-| 27 | **Decoder-verified RGB YCbCr (`ycbcr_decode_verify`)** | Encoder-side fast check only. | Final `cm=6` candidate is verified with the exact decoder IDCT + `clip(+128)` + `ycbcr_to_rgb` pipeline (`_rgb_error_via_decoder`). |
-| 28 | **Batched `cm=6` plane decoding** | Block-by-block IDCT loop during decompression. | `_reconstruct_plane_batched` evaluates `scipy.fft.idct` on block chunks. |
-| 29 | **Explicit predictive (`cm=7`) & SZ3 (`cm=8`) modes** | DCT-only pipeline. | Optional `--method pred` (`.fpred` MED + scalar quantization) and `--method sz3` (`.sz3` external SZ3) with full `.7z` and GeoTIFF metadata integration. |
-| 30 | **IDW interpolation** | `interpolation.py` with NumPy/numexpr or Dask engine; cells with fewer than N points could get values close to zero (Dask). | `interpolate.py` / `interpolation/`: one KD-tree engine with block queries, the points that exist are used, north-up GeoTIFF, geoid limit as a setting, optional compression of the grid with the VT/VF check, web GUI tab. |
+| 26 | **Decoder-verified RGB YCbCr (`ycbcr_decode_verify`)** | Encoder-side fast check only. | Final `cm=6` candidate is verified with the exact decoder IDCT + `clip(+128)` + `ycbcr_to_rgb` pipeline (`_rgb_error_via_decoder`). |
+| 27 | **Batched `cm=6` plane decoding** | Block-by-block IDCT loop during decompression. | `_reconstruct_plane_batched` evaluates `scipy.fft.idct` on block chunks. |
+| 28 | **Explicit predictive (`cm=7`) & SZ3 (`cm=8`) modes** | DCT-only pipeline. | Optional `--method pred` (`.fpred` MED + scalar quantization) and `--method sz3` (`.sz3` external SZ3) with full `.7z` and GeoTIFF metadata integration. |
+| 29 | **IDW interpolation** | `interpolation.py` with NumPy/numexpr or Dask engine; cells with fewer than N points could get values close to zero (Dask). | `interpolate.py` / `interpolation/`: one KD-tree engine with block queries, the points that exist are used, north-up GeoTIFF, geoid limit as a setting, optional compression of the grid with the VT/VF check, web GUI tab. |
 ---
 
 ## 13. Performance Test Results - FIDWAC v2 vs SZ3
